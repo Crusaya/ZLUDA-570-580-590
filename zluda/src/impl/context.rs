@@ -7,9 +7,11 @@ use cuda_types::*;
 use hip_runtime_sys::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::ptr;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::{cell::RefCell, ffi::c_void};
+
+static NEXT_CONTEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 // We store device separately to avoid accessing context fields when popping
 // a context from the stack. It's perfectly ok to destroy a context and remove
@@ -41,6 +43,7 @@ impl ZludaObject for ContextData {
 }
 
 pub(crate) struct ContextData {
+    id: u64,
     pub(crate) device: hipDevice_t,
     pub(crate) variant: ContextVariant,
 }
@@ -64,6 +67,7 @@ pub(crate) struct NonPrimaryContextData {
 impl ContextData {
     pub(crate) fn new_non_primary(flags: u32, device: hipDevice_t) -> Self {
         Self {
+            id: NEXT_CONTEXT_ID.fetch_add(1, Ordering::Relaxed),
             device,
             variant: ContextVariant::NonPrimary(NonPrimaryContextData {
                 flags: AtomicU32::new(flags),
@@ -74,6 +78,7 @@ impl ContextData {
 
     pub(crate) fn new_primary(device: hipDevice_t) -> Self {
         Self {
+            id: NEXT_CONTEXT_ID.fetch_add(1, Ordering::Relaxed),
             device,
             variant: ContextVariant::Primary(Mutex::new(PrimaryContextData {
                 ref_count: 0,
@@ -246,6 +251,21 @@ pub(crate) unsafe fn get_api_version(ctx: *mut Context, version: *mut u32) -> Re
     Ok(())
 }
 
+pub(crate) unsafe fn get_id(
+    ctx: *mut Context,
+    ctx_id: *mut ::std::os::raw::c_ulonglong,
+) -> Result<(), CUresult> {
+    if ctx_id.is_null() {
+        return Err(CUresult::CUDA_ERROR_INVALID_VALUE);
+    }
+    if ctx.is_null() {
+        return Err(CUresult::CUDA_ERROR_INVALID_CONTEXT);
+    }
+    let context = LiveCheck::as_result(ctx)?;
+    *ctx_id = context.id as ::std::os::raw::c_ulonglong;
+    Ok(())
+}
+
 pub(crate) unsafe fn synchronize() -> Result<(), CUresult> {
     // TODO
     // We currently do this to sync with default stream which syncs whole device anyway,
@@ -301,4 +321,49 @@ pub(crate) unsafe fn get_stream_priority_range(
         greatest_priority
     ));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_ids_are_stable_and_unique() {
+        let mut first = LiveCheck::new(ContextData::new_non_primary(0, 0));
+        let mut second = LiveCheck::new(ContextData::new_primary(0));
+        let mut first_id = 0;
+        let mut repeated_first_id = 0;
+        let mut second_id = 0;
+
+        unsafe {
+            get_id(&mut first, &mut first_id).unwrap();
+            get_id(&mut first, &mut repeated_first_id).unwrap();
+            get_id(&mut second, &mut second_id).unwrap();
+        }
+
+        assert_ne!(first_id, 0);
+        assert_eq!(first_id, repeated_first_id);
+        assert_ne!(first_id, second_id);
+    }
+
+    #[test]
+    fn context_id_rejects_invalid_arguments() {
+        let mut context = LiveCheck::new(ContextData::new_non_primary(0, 0));
+        let mut context_id = 0;
+
+        assert_eq!(
+            unsafe { get_id(ptr::null_mut(), &mut context_id) },
+            Err(CUresult::CUDA_ERROR_INVALID_CONTEXT)
+        );
+        assert_eq!(
+            unsafe { get_id(&mut context, ptr::null_mut()) },
+            Err(CUresult::CUDA_ERROR_INVALID_VALUE)
+        );
+
+        context.try_drop(false).unwrap();
+        assert_eq!(
+            unsafe { get_id(&mut context, &mut context_id) },
+            Err(CUresult::CUDA_ERROR_INVALID_CONTEXT)
+        );
+    }
 }

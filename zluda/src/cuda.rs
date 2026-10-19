@@ -67,6 +67,7 @@ cuda_function_declarations!(
         cuCtxSetCurrent,
         cuCtxGetCurrent,
         cuCtxGetDevice,
+        cuCtxGetId,
         cuCtxGetLimit,
         cuCtxSetLimit,
         cuCtxSetFlags,
@@ -488,6 +489,13 @@ mod definitions {
 
     pub(crate) unsafe fn cuCtxGetDevice(device: *mut hipDevice_t) -> Result<(), CUresult> {
         context::get_device(device)
+    }
+
+    pub(crate) unsafe fn cuCtxGetId(
+        ctx: *mut context::Context,
+        ctxId: *mut ::std::os::raw::c_ulonglong,
+    ) -> Result<(), CUresult> {
+        context::get_id(ctx, ctxId)
     }
 
     pub(crate) unsafe fn cuCtxGetLimit(
