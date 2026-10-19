@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-22.04
     needs: release
     steps:
-      - uses: jlumbroso/free-disk-space@main
+      - uses: jlumbroso/free-disk-space@36e9a5af4eddb91fc11aec4c6f6f79b3cc0cb523
       - name: Install ROCm
         run: |
           sudo mkdir --parents --mode=0755 /etc/apt/keyrings
