@@ -1,3 +1,4 @@
+use embed_manifest::{embed_manifest, new_manifest};
 use std::{
     env::{self, VarError},
     fs::{self, DirEntry},
@@ -7,11 +8,14 @@ use std::{
 };
 
 fn main() -> Result<(), VarError> {
-    if std::env::var_os("CARGO_CFG_WINDOWS").is_none() {
-        return Ok(());
+    if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
+        embed_manifest(new_manifest("zluda_with")).expect("unable to embed manifest file");
     }
     println!("cargo:rerun-if-changed=build.rs");
     if env::var("PROFILE")? != "debug" {
+        return Ok(());
+    }
+    if env::var("CARGO_CFG_TARGET_OS")? != "windows" {
         return Ok(());
     }
     let rustc_exe = env::var("RUSTC")?;
@@ -39,10 +43,21 @@ fn main() -> Result<(), VarError> {
         rustc_cmd.arg(format!("-Lnative={}", helpers_dir_as_string));
         if !is_msvc {
             // HACK ALERT
-            // I have no idea why the extra library below have to be linked
+            // I have no idea why the extra library below has to be linked
             rustc_cmd.arg(r"-lucrt");
+        } else {
+            // For some reason rustc emits foobar.dll.lib and then expects foobar.lib
+            let mut implib_path = PathBuf::from(&out_dir);
+            let implib = PathBuf::from(rust_file);
+            implib_path.push(format!(
+                "{}.lib",
+                implib.file_stem().unwrap().to_string_lossy()
+            ));
+            let link_args = format!("link-args=/IMPLIB:{}", implib_path.as_path().display());
+            rustc_cmd.args(["-C", link_args.as_str()]);
         }
         rustc_cmd
+            .arg("-ldylib=nvcuda")
             .arg("-C")
             .arg(format!("opt-level={}", opt_level))
             .arg("-L")

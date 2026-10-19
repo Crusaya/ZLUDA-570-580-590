@@ -1,44 +1,21 @@
-use crate::pass::{self, TranslateError};
-use ptx_parser as ast;
+use hip_common::CompilationMode;
 
+use super::ptx;
+use super::TranslateError;
+
+mod raytracing;
 mod spirv_run;
 
-#[cfg(not(feature = "ci_build"))]
-#[macro_export]
-macro_rules! read_test_file {
-    ($file:expr) => {
-        {
-            use std::path::PathBuf;
-            // CARGO_MANIFEST_DIR is the crate directory (ptx), but file! is relative to the workspace root (and therefore also includes ptx).
-            let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            path.pop();
-            path.push(file!());
-            path.pop();
-            path.push($file);
-            std::fs::read_to_string(path).unwrap()
-        }
-    };
+fn parse_and_assert(s: &str) {
+    let mut errors = Vec::new();
+    ptx::ModuleParser::new().parse(&mut errors, s).unwrap();
+    assert!(errors.len() == 0);
 }
 
-#[cfg(feature = "ci_build")]
-#[macro_export]
-macro_rules! read_test_file {
-    ($file:expr) => {
-        include_str!($file).to_string()
-    };
-}
-pub(crate) use read_test_file;
-
-fn parse_and_assert(ptx_text: &str) {
-    ast::parse_module_checked(ptx_text).unwrap();
-}
-
-fn compile_and_assert(ptx_text: &str) -> Result<(), TranslateError> {
-    let ast = ast::parse_module_checked(ptx_text).unwrap();
-    let attributes = pass::Attributes {
-        clock_rate: 2124000,
-    };
-    crate::to_llvm_module(ast, attributes, |_| {})?;
+fn compile_and_assert(compilation_mode: CompilationMode, s: &str) -> Result<(), TranslateError> {
+    let mut errors = Vec::new();
+    let ast = ptx::ModuleParser::new().parse(&mut errors, s).unwrap();
+    crate::to_llvm_module(compilation_mode, vec![ast])?;
     Ok(())
 }
 
@@ -57,19 +34,19 @@ fn operands_ptx() {
 #[allow(non_snake_case)]
 fn vectorAdd_kernel64_ptx() -> Result<(), TranslateError> {
     let vector_add = include_str!("vectorAdd_kernel64.ptx");
-    compile_and_assert(vector_add)
+    compile_and_assert(CompilationMode::Wave32, vector_add)
 }
 
 #[test]
 #[allow(non_snake_case)]
 fn _Z9vectorAddPKfS0_Pfi_ptx() -> Result<(), TranslateError> {
     let vector_add = include_str!("_Z9vectorAddPKfS0_Pfi.ptx");
-    compile_and_assert(vector_add)
+    compile_and_assert(CompilationMode::Wave32, vector_add)
 }
 
 #[test]
 #[allow(non_snake_case)]
 fn vectorAdd_11_ptx() -> Result<(), TranslateError> {
     let vector_add = include_str!("vectorAdd_11.ptx");
-    compile_and_assert(vector_add)
+    compile_and_assert(CompilationMode::Wave32, vector_add)
 }

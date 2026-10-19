@@ -8,38 +8,21 @@
 )
 {
 	.reg .u64 	    in_addr;
-	.reg .u64 	    out_addr;
-	.reg .u32 	    a;
-	.reg .u32 	    b;
-	.reg .u32 	    r1;
-	.reg .u32 	    r2;
-	.reg .u32 	    r3;
-	.reg .u32 	    r4;
-	.reg .u32 	    r5;
-	.reg .pred 	    p1;
-	.reg .pred 	    p2;
-	.reg .pred 	    p3;
-	.reg .pred 	    p4;
-	.reg .pred 	    p5;
-	.reg .pred 	    p6;
+    .reg .u64 	    out_addr;
+    .reg .f32 	    r1;
+    .reg .f32 	    r2;
+    .reg .f32 	    r3;
+    .reg .pred 	    yes;
+    .reg .pred 	    no;
 
-	ld.param.u64 	in_addr, [input];
-	ld.param.u64 	out_addr, [output];
+    ld.param.u64        in_addr, [input];
+    ld.param.u64        out_addr, [output];
 
-	ld.u32          a, [in_addr];
-	ld.u32          b, [in_addr+4];
-	setp.lt.u32     p1|p2, a, b;
-	setp.lt.u32     p6|p3, b, a;
-	setp.lt.xor.u32 p4|p5, a, b, p1;
-	selp.u32        r1, 1, 0, p1;
-	selp.u32        r2, 1, 0, p2;
-	selp.u32        r3, 1, 0, p3;
-	selp.u32        r4, 1, 0, p4;
-	selp.u32        r5, 1, 0, p5;
-	st.u32          [out_addr], r1;
-	st.u32          [out_addr+4], r2;
-	st.u32          [out_addr+8], r3;
-	st.u32          [out_addr+12], r4;
-	st.u32          [out_addr+16], r5;
-	ret;
+    ld.f32              r1, [in_addr];
+    ld.f32              r2, [in_addr + 4];
+    setp.gt.ftz.f32     yes|no, r1, r2;
+    @yes mov.f32        r3, r1;
+    @no mov.f32         r3, r2;
+    st.f32              [out_addr], r3;
+    ret;
 }

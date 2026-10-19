@@ -1,332 +1,218 @@
-use crate::r#impl::{
-    context,
-    driver::{self},
-};
-use cuda_types::cuda::{CUerror, CUresult, CUresultConsts};
+use super::stream::Stream;
+use super::{hipfix, stream};
+use crate::hip_call_cuda;
+use crate::r#impl::{memcpy2d_from_cuda, GLOBAL_STATE};
+use cuda_types::*;
 use hip_runtime_sys::*;
 use std::{mem, ptr};
-use zluda_common::FromCuda;
 
-struct DropGuard<F: FnMut()>(F);
-
-impl<F: FnMut()> Drop for DropGuard<F> {
-    fn drop(&mut self) {
-        (self.0)();
+pub(crate) unsafe fn alloc(dptr: *mut hipDeviceptr_t, mut bytesize: usize) -> Result<(), CUresult> {
+    if dptr == ptr::null_mut() {
+        return Err(CUresult::CUDA_ERROR_INVALID_VALUE);
     }
-}
-
-pub(crate) unsafe fn alloc_v2(dptr: &mut hipDeviceptr_t, bytesize: usize) -> CUresult {
-    let cu_context = context::get_current_context()?;
-    let context: &context::Context = FromCuda::<_, CUerror>::from_cuda(&cu_context)?;
-    hipMalloc(ptr::from_mut(dptr).cast(), bytesize)?;
-    fill_with_zero_and_register(cu_context, context, dptr, bytesize)?;
+    let zero_buffers = GLOBAL_STATE.get()?.zero_buffers;
+    bytesize = hipfix::alloc_round_up(bytesize);
+    let mut ptr = mem::zeroed();
+    hip_call_cuda!(hipMalloc(&mut ptr, bytesize));
+    if zero_buffers {
+        hip_call_cuda!(hipMemsetD32(hipDeviceptr_t(ptr), 0, bytesize / 4));
+    }
+    *dptr = hipDeviceptr_t(ptr);
     Ok(())
 }
 
-unsafe fn fill_with_zero_and_register(
-    cu_context: cuda_types::cuda::CUcontext,
-    context: &context::Context,
-    dptr: &mut hipDeviceptr_t,
-    bytesize: usize,
-) -> Result<(), CUerror> {
-    let drop_guard = DropGuard(|| {
-        unsafe { hipFree(dptr.0) }.ok();
-    });
-    let mut capturing_status = mem::zeroed();
-    hipStreamIsCapturing(hipStream_t(ptr::null_mut()), &mut capturing_status)?;
-    if capturing_status == hipStreamCaptureStatus::hipStreamCaptureStatusNone {
-        hipMemsetD8Async(*dptr, 0, bytesize, context.alloc_stream)?;
-        hipStreamSynchronize(context.alloc_stream)?;
-    }
-    add_allocation(dptr.0, bytesize, cu_context)?;
-    mem::forget(drop_guard);
+pub(crate) unsafe fn copy_h_to_d_async(
+    dst_device: hipDeviceptr_t,
+    src_host: *const std::ffi::c_void,
+    byte_count: usize,
+    stream: *mut Stream,
+    default_stream_per_thread: bool,
+) -> Result<(), CUresult> {
+    let hip_stream = hipfix::as_hip_stream_per_thread(stream, default_stream_per_thread)?;
+    hip_call_cuda!(hipMemcpyHtoDAsync(
+        dst_device,
+        src_host as _,
+        byte_count,
+        hip_stream
+    ));
     Ok(())
 }
 
-pub(crate) unsafe fn free_v2(dptr: hipDeviceptr_t) -> CUresult {
-    let hip_result = hipFree(dptr.0);
-    remove_allocation(dptr.0)?;
-    Ok(hip_result?)
-}
-
-pub(crate) fn copy_dto_h_v2(
-    dst_host: *mut ::core::ffi::c_void,
+pub(crate) unsafe fn copy_d_to_h_async(
+    dst_host: *mut ::std::os::raw::c_void,
     src_device: hipDeviceptr_t,
     byte_count: usize,
-) -> hipError_t {
-    unsafe { hipMemcpyDtoH(dst_host, src_device, byte_count) }
+    stream: *mut Stream,
+    default_stream_per_thread: bool,
+) -> Result<(), CUresult> {
+    let hip_stream = hipfix::as_hip_stream_per_thread(stream, default_stream_per_thread)?;
+    hip_call_cuda!(hipMemcpyDtoHAsync(
+        dst_host, src_device, byte_count, hip_stream
+    ));
+    Ok(())
 }
 
-pub(crate) fn copy_hto_d_v2(
-    dst_device: hipDeviceptr_t,
-    src_host: *const ::core::ffi::c_void,
-    byte_count: usize,
-) -> hipError_t {
-    unsafe { hipMemcpyHtoD(dst_device, src_host.cast_mut(), byte_count) }
-}
-
-pub(crate) fn copy_hto_d_v2_ptds(
-    dst_device: hipDeviceptr_t,
-    src_host: *const ::core::ffi::c_void,
-    byte_count: usize,
-) -> hipError_t {
-    unsafe {
-        hipMemcpy_spt(
-            dst_device.0.cast(),
-            src_host.cast_mut(),
-            byte_count,
-            hipMemcpyKind::hipMemcpyHostToDevice,
-        )
-    }
-}
-
-pub(crate) fn copy_dto_h_v2_ptds(
-    dst_host: *mut ::core::ffi::c_void,
-    src_device: hipDeviceptr_t,
-    byte_count: usize,
-) -> hipError_t {
-    unsafe {
-        hipMemcpy_spt(
-            dst_host.cast(),
-            src_device.0.cast(),
-            byte_count,
-            hipMemcpyKind::hipMemcpyDeviceToHost,
-        )
-    }
-}
-
-pub(crate) fn get_address_range_v2(
+// TODO: just call hipMemGetAddressRange when HIP fixes handling of NULL args
+pub(crate) unsafe fn get_address_range(
     pbase: *mut hipDeviceptr_t,
     psize: *mut usize,
     dptr: hipDeviceptr_t,
 ) -> hipError_t {
-    unsafe { hipMemGetAddressRange(pbase, psize, dptr) }
-}
-
-pub(crate) fn set_d8_v2(dst: hipDeviceptr_t, value: ::core::ffi::c_uchar, n: usize) -> hipError_t {
-    unsafe { hipMemsetD8(dst, value, n) }
-}
-
-pub(crate) fn set_d8_async(
-    dst: hipDeviceptr_t,
-    value: ::core::ffi::c_uchar,
-    n: usize,
-    stream: hipStream_t,
-) -> hipError_t {
-    unsafe { hipMemsetD8Async(dst, value, n, stream) }
-}
-
-pub(crate) fn set_d16_v2(
-    dst: hipDeviceptr_t,
-    value: ::core::ffi::c_ushort,
-    n: usize,
-) -> hipError_t {
-    unsafe { hipMemsetD16(dst, value, n) }
-}
-
-pub(crate) fn set_d16_async(
-    dst: hipDeviceptr_t,
-    value: ::core::ffi::c_ushort,
-    n: usize,
-    stream: hipStream_t,
-) -> hipError_t {
-    unsafe { hipMemsetD16Async(dst, value, n, stream) }
-}
-
-pub(crate) fn set_d32_v2(dst: hipDeviceptr_t, value: ::core::ffi::c_uint, n: usize) -> hipError_t {
-    unsafe { hipMemsetD32(dst, value as _, n) }
-}
-
-pub(crate) fn set_d32_async(
-    dst: hipDeviceptr_t,
-    value: ::core::ffi::c_uint,
-    n: usize,
-    stream: hipStream_t,
-) -> hipError_t {
-    unsafe { hipMemsetD32Async(dst, value as _, n, stream) }
-}
-
-pub(crate) fn get_info_v2(free: *mut usize, total: *mut usize) -> hipError_t {
-    unsafe { hipMemGetInfo(free, total) }
-}
-
-pub(crate) unsafe fn free_host(ptr: *mut ::core::ffi::c_void) -> CUresult {
-    let hip_result = hipFreeHost(ptr);
-    remove_allocation(ptr)?;
-    Ok(hip_result?)
-}
-
-pub(crate) unsafe fn host_alloc(
-    pp: &mut *mut ::core::ffi::c_void,
-    bytesize: usize,
-    flags: ::std::os::raw::c_uint,
-) -> CUresult {
-    let context = context::get_current_context()?;
-    hipHostMalloc(pp, bytesize, flags)?;
-    add_allocation(*pp, bytesize, context)?;
-    Ok(())
-}
-
-pub(crate) unsafe fn host_get_device_pointer_v2(
-    pdptr: &mut hipDeviceptr_t,
-    p: *mut ::core::ffi::c_void,
-    flags: ::std::os::raw::c_uint,
-) -> CUresult {
-    if p.is_null() {
-        return CUresult::ERROR_INVALID_VALUE;
+    let mut base = hipDeviceptr_t(ptr::null_mut());
+    let mut size = 0;
+    let result = hipMemGetAddressRange(&mut base, &mut size, dptr);
+    if pbase != ptr::null_mut() {
+        *pbase = base;
     }
-
-    // HIP equivalent of cuMemHostGetDevicePointer_v2
-    hipHostGetDevicePointer(std::ptr::from_mut(pdptr).cast(), p, flags)?;
-    Ok(())
+    if psize != ptr::null_mut() {
+        *psize = size;
+    }
+    result
 }
 
-fn add_allocation(
-    dptr: *mut ::core::ffi::c_void,
-    bytesize: usize,
-    context: cuda_types::cuda::CUcontext,
-) -> Result<(), CUerror> {
-    let global_state = driver::global_state()?;
-    let mut allocations = global_state
-        .allocations
-        .lock()
-        .map_err(|_| CUerror::UNKNOWN)?;
-    allocations.insert(dptr as usize, bytesize, context);
-    Ok(())
+pub(crate) unsafe fn copy3d(copy: *const CUDA_MEMCPY3D) -> Result<(), CUresult> {
+    if let Some(copy_desc) = copy.as_ref() {
+        hipfix::array::copy3d(copy_desc)
+    } else {
+        Err(CUresult::CUDA_ERROR_INVALID_VALUE)
+    }
 }
 
-fn remove_allocation(ptr: *mut std::ffi::c_void) -> Result<(), CUerror> {
-    let global_state = driver::global_state()?;
-    let mut allocations = global_state
-        .allocations
-        .lock()
-        .map_err(|_| CUerror::UNKNOWN)?;
-    allocations.remove(ptr as usize);
-    Ok(())
+pub(crate) unsafe fn copy2d_async(
+    copy: *const CUDA_MEMCPY2D,
+    stream: *mut Stream,
+) -> Result<(), CUresult> {
+    if let Some(copy) = copy.as_ref() {
+        let hip_stream = stream::as_hip_stream(stream)?;
+        let copy = memcpy2d_from_cuda(copy);
+        hip_call_cuda!(hipMemcpyParam2DAsync(&copy, hip_stream));
+        Ok(())
+    } else {
+        Err(CUresult::CUDA_ERROR_INVALID_VALUE)
+    }
 }
 
-pub(crate) unsafe fn retain_allocation_handle(
-    _handle: *mut cuda_types::cuda::CUmemGenericAllocationHandle,
-    _addr: *mut ::core::ffi::c_void,
-) -> CUresult {
-    CUresult::ERROR_NOT_SUPPORTED
+pub(crate) unsafe fn copy3d_async(
+    copy: *const CUDA_MEMCPY3D,
+    stream: *mut Stream,
+) -> Result<(), CUresult> {
+    if let Some(copy) = copy.as_ref() {
+        let hip_stream = stream::as_hip_stream(stream)?;
+        hipfix::array::copy3d_async(hip_stream, copy)?;
+        Ok(())
+    } else {
+        Err(CUresult::CUDA_ERROR_INVALID_VALUE)
+    }
 }
 
-pub(crate) unsafe fn copy_hto_d_async_v2(
+pub(crate) unsafe fn copy2d(copy: *const CUDA_MEMCPY2D) -> hipError_t {
+    if let Some(copy) = copy.as_ref() {
+        let copy = memcpy2d_from_cuda(copy);
+        hipMemcpyParam2D(&copy)
+    } else {
+        hipError_t::hipErrorInvalidValue
+    }
+}
+
+pub(crate) unsafe fn copy2d_unaligned(copy: *const CUDA_MEMCPY2D) -> hipError_t {
+    if let Some(copy) = copy.as_ref() {
+        let copy = memcpy2d_from_cuda(copy);
+        hipDrvMemcpy2DUnaligned(&copy)
+    } else {
+        hipError_t::hipErrorInvalidValue
+    }
+}
+
+pub(crate) unsafe fn set_d8_async(
     dst_device: hipDeviceptr_t,
-    src_host: *const ::core::ffi::c_void,
-    byte_count: usize,
-    stream: hipStream_t,
-) -> hipError_t {
-    hipMemcpyHtoDAsync(dst_device, src_host.cast_mut(), byte_count, stream)
+    uc: ::std::os::raw::c_uchar,
+    n: usize,
+    stream: *mut stream::Stream,
+    default_stream_per_thread: bool,
+) -> Result<(), CUresult> {
+    let hip_stream = hipfix::as_hip_stream_per_thread(stream, default_stream_per_thread)?;
+    hip_call_cuda!(hipMemsetD8Async(dst_device, uc, n, hip_stream));
+    Ok(())
 }
 
-pub(crate) unsafe fn copy_dto_h_async_v2(
-    dst_host: *mut ::core::ffi::c_void,
+pub(crate) unsafe fn set_d32_async(
+    dst_device: hipDeviceptr_t,
+    uc: ::std::os::raw::c_uint,
+    n: usize,
+    stream: *mut stream::Stream,
+) -> Result<(), CUresult> {
+    let hip_stream = stream::as_hip_stream(stream)?;
+    hip_call_cuda!(hipMemsetD32Async(dst_device, uc as i32, n, hip_stream));
+    Ok(())
+}
+
+pub(crate) unsafe fn host_get_device_pointer(
+    pdptr: *mut hipDeviceptr_t,
+    p: *mut ::std::os::raw::c_void,
+    flags: ::std::os::raw::c_uint,
+) -> hipError_t {
+    hipHostGetDevicePointer(pdptr as _, p, flags)
+}
+
+pub(crate) unsafe fn copy_dtd_async(
+    dst_device: hipDeviceptr_t,
     src_device: hipDeviceptr_t,
     byte_count: usize,
-    stream: hipStream_t,
-) -> hipError_t {
-    hipMemcpyDtoHAsync(dst_host, src_device, byte_count, stream)
-}
-
-pub(crate) unsafe fn copy_dto_d_async_v2(
-    dst_device: hipDeviceptr_t,
-    src_device: hipDeviceptr_t,
-    byte_count: usize,
-    stream: hipStream_t,
-) -> hipError_t {
-    hipMemcpyDtoDAsync(dst_device, src_device, byte_count, stream)
+    stream: *mut stream::Stream,
+    default_stream_per_thread: bool,
+) -> Result<(), CUresult> {
+    let hip_stream = hipfix::as_hip_stream_per_thread(stream, default_stream_per_thread)?;
+    hip_call_cuda!(hipMemcpyDtoDAsync(
+        dst_device, src_device, byte_count, hip_stream
+    ));
+    Ok(())
 }
 
 pub(crate) unsafe fn copy_async(
     dst: hipDeviceptr_t,
     src: hipDeviceptr_t,
     byte_count: usize,
-    stream: hipStream_t,
-) -> hipError_t {
-    hipMemcpyAsync(
+    h_stream: *mut stream::Stream,
+    default_stream_per_thread: bool,
+) -> Result<(), CUresult> {
+    let hip_stream = hipfix::as_hip_stream_per_thread(h_stream, default_stream_per_thread)?;
+    hip_call_cuda!(hipMemcpyAsync(
         dst.0,
         src.0,
         byte_count,
         hipMemcpyKind::hipMemcpyDefault,
-        stream,
-    )
-}
-
-pub(crate) fn get_allocation_granularity(
-    _granularity: &mut usize,
-    _property: &cuda_types::cuda::CUmemAllocationProp,
-    _option: cuda_types::cuda::CUmemAllocationGranularity_flags,
-) -> CUresult {
-    CUresult::ERROR_NOT_SUPPORTED
-}
-
-pub(crate) unsafe fn alloc_pitch_v2(
-    dptr: *mut hipDeviceptr_t,
-    p_pitch: *mut usize,
-    width_in_bytes: usize,
-    height: usize,
-    element_size_bytes: ::core::ffi::c_uint,
-) -> CUresult {
-    hipMemAllocPitch(
-        dptr.cast(),
-        p_pitch,
-        width_in_bytes,
-        height,
-        element_size_bytes,
-    )?;
+        hip_stream
+    ));
     Ok(())
 }
 
-pub(crate) unsafe fn copy_2d_v2(memcpy: hip_Memcpy2D) -> CUresult {
-    hipMemcpyParam2D(&memcpy)?;
+pub(crate) unsafe fn free_async(
+    dptr: hipDeviceptr_t,
+    stream: *mut stream::Stream,
+) -> Result<(), CUresult> {
+    let hip_stream = stream::as_hip_stream(stream)?;
+    hip_call_cuda! { hipFreeAsync(dptr.0, hip_stream) };
     Ok(())
 }
 
-pub(crate) unsafe fn copy_2d_unaligned_v2(memcpy: hip_Memcpy2D) -> CUresult {
-    hipDrvMemcpy2DUnaligned(&memcpy)?;
+pub(crate) unsafe fn prefetch_async(
+    dev_ptr: hipDeviceptr_t,
+    count: usize,
+    dst_device: hipDevice_t,
+    stream: *mut stream::Stream,
+) -> Result<(), CUresult> {
+    let hip_stream = stream::as_hip_stream(stream)?;
+    hip_call_cuda! { hipMemPrefetchAsync(dev_ptr.0, count, dst_device, hip_stream) };
     Ok(())
 }
 
-pub(crate) unsafe fn set_d_2d32_v2(
+pub(crate) unsafe fn set_d8_ptds(
     dst_device: hipDeviceptr_t,
-    dst_pitch: usize,
-    value: ::core::ffi::c_uint,
-    width: usize,
-    height: usize,
+    uc: ::std::os::raw::c_uchar,
+    byte_size: usize,
 ) -> hipError_t {
-    hipMemset2D(dst_device.0, dst_pitch, value as _, width, height)
-}
-
-pub(crate) unsafe fn set_d_2d32_async(
-    dst_device: hipDeviceptr_t,
-    dst_pitch: usize,
-    value: ::core::ffi::c_uint,
-    width: usize,
-    height: usize,
-    stream: hipStream_t,
-) -> hipError_t {
-    hipMemset2DAsync(dst_device.0, dst_pitch, value as _, width, height, stream)
-}
-
-pub(crate) unsafe fn copy_hto_a_v2(
-    dst_array: hipArray_t,
-    dst_offset: usize,
-    src_host: *const ::core::ffi::c_void,
-    byte_count: usize,
-) -> hipError_t {
-    hipMemcpyHtoA(dst_array, dst_offset, src_host, byte_count)
-}
-
-pub(crate) unsafe fn copy_dto_d_v2(
-    dst_device: hipDeviceptr_t,
-    src_device: hipDeviceptr_t,
-    byte_count: usize,
-) -> hipError_t {
-    hipMemcpyDtoD(dst_device, src_device, byte_count)
-}
-
-pub(crate) unsafe fn copy_3d_v2(memcpy: HIP_MEMCPY3D) -> hipError_t {
-    hipDrvMemcpy3D(&memcpy)
+    let byte_size = hipfix::alloc_round_up(byte_size);
+    let int_size = byte_size / 4;
+    let value = i32::from_ne_bytes([uc, uc, uc, uc]);
+    hipMemset_spt(dst_device.0, value, int_size)
 }

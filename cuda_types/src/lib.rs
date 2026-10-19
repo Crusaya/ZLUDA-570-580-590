@@ -1,12 +1,12 @@
-pub enum FILE {}
+use cuda_base::cuda_type_declarations;
 
-pub mod cublas;
-pub mod cublaslt;
-pub mod cuda;
-pub mod cudnn;
-pub mod cudnn8;
-pub mod cudnn9;
-pub mod cufft;
-pub mod cusparse;
-pub mod nvml;
-pub mod dark_api;
+cuda_type_declarations!();
+
+impl From<CUresult> for Result<(), CUresult> {
+    fn from(value: CUresult) -> Self {
+        match value {
+            CUresult::CUDA_SUCCESS => Ok(()),
+            err => Err(err),
+        }
+    }
+}

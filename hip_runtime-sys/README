@@ -1,0 +1,1 @@
+bindgen $Env:HIP_PATH/include/hip/hip_runtime_api.h -o src/hip_runtime_api.rs --no-layout-tests --default-enum-style=newtype --allowlist-function "hip.*" --allowlist-type "hip.*" --no-derive-debug --must-use-type hipError_t --new-type-alias "^hipDeviceptr_t$" --allowlist-var "^hip.*$" -- -I"$Env:HIP_PATH/include" -D__HIP_PLATFORM_AMD__

@@ -6,33 +6,39 @@ edition = "2021"
 
 [lib]
 
+[features]
+rocm5 = ["hip_common/rocm5", "hip_runtime-sys/rocm5", "comgr/rocm5"]
+
 [dependencies]
-ptx_parser = { path = "../ptx_parser" }
-llvm_zluda = { path = "../llvm_zluda" }
-kernel_metadata = { path = "../kernel_metadata" }
-quick-error = "1.2"
+hip_common = { path = "../hip_common" }
+zluda_llvm = { path = "../zluda_llvm" }
+regex = "1"
 thiserror = "1.0"
-bit-vec = "0.8"
-half = "2.7"
-bitflags = "1.2"
-rustc-hash = "2.0.0"
-strum = "0.28"
-strum_macros = "0.28"
-petgraph = "0.7.1"
-highs = "1.12.0"
-int-enum = "1.1"
-unwrap_or = "1.0.1"
-smallvec = "1.15.1"
-fixedbitset = "0.5"
+num-traits = "0.2"
+rustc-hash = "1.1"
+cpp_demangle = "0.3.5"
+paste = "1.0"
+bit-vec = "0.6.3"
+either = "1.9"
+
+[dependencies.half]
+version = "1.8"
+features = ["num-traits"]
+
+[dependencies.lalrpop-util]
+version = "0.22"
+features = ["lexer"]
 
 [dev-dependencies]
-hip_runtime-sys = { path = "../ext/hip_runtime-sys" }
+cuda_base = { path = "../cuda_base" }
 cuda_types = { path = "../cuda_types" }
-cuda_macros = { path = "../cuda_macros" }
+hip_runtime-sys = { path = "../hip_runtime-sys" }
+hiprt-sys = { path = "../hiprt-sys" }
+comgr = { path = "../comgr" }
 tempfile = "3"
-paste = "1.0"
-pretty_assertions = "1.4.1"
 libloading = "0.8"
+lazy_static = "1.4.0"
 
-[features]
-ci_build = []
+[build-dependencies.lalrpop]
+version = "0.22"
+features = ["lexer"]

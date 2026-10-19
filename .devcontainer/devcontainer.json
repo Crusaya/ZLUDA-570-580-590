@@ -1,37 +1,39 @@
-// For format details, see https://aka.ms/devcontainer.json. For config options, see the
-// README at: https://github.com/devcontainers/templates/tree/main/src/rust
+// For format details, see https://aka.ms/devcontainer.json
 {
-	"name": "zluda",
+	"name": "ZLUDA",
 	"build": {
 		"dockerfile": "Dockerfile"
 	},
-	"securityOpt": [ "seccomp=unconfined" ],
+	"securityOpt": [
+		"seccomp=unconfined"
+	],
+	// Make NVIDIA and AMD GPUs available
 	"runArgs": [
+		// Uncomment on newer docker/podman
 		//"--runtime=nvidia",
 		"--device=/dev/kfd",
 		"--device=/dev/dri",
 		"--group-add=video"
 	],
+	// Cache cargo packages and compiled ZLUDA kernels
+	"initializeCommand": "mkdir -p ${localEnv:HOME}/.cargo/git ${localEnv:HOME}/.cargo/registry ${localEnv:HOME}/.cache/ZLUDA",
 	"mounts": [
 		{
-			"source": "${localEnv:HOME}/.cargo/",
-			"target": "/root/.cargo",
+			"source": "${localEnv:HOME}/.cargo/git",
+			"target": "/root/.cargo/git",
+			"type": "bind"
+		},
+		{
+			"source": "${localEnv:HOME}/.cargo/registry",
+			"target": "/root/.cargo/registry",
+			"type": "bind"
+		},
+		{
+			"source": "${localEnv:HOME}/.cache/ZLUDA",
+			"target": "/root/.cache/ZLUDA",
 			"type": "bind"
 		}
 	],
-	// https://containers.dev/features.
-	"features": {
-		"ghcr.io/devcontainers/features/rust:1": {}
-	},
-	// https://aka.ms/dev-containers-non-root.
-	"remoteUser": "root",
-	"hostRequirements": { "gpu": true },
-	"customizations": {
-		"vscode": {
-			"extensions": [ "mhutchie.git-graph" ]
-		}
-	},
-	"containerEnv": {
-		"NVIDIA_DISABLE_REQUIRE": "1"
-	}
+	// Rootless docker requires logging as root: https://aka.ms/dev-containers-non-root.
+	"remoteUser": "root"
 }

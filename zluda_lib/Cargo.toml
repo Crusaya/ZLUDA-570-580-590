@@ -1,0 +1,20 @@
+[package]
+name = "zluda_lib"
+version = "0.0.0"
+authors = ["Andrzej Janik <vosen@vosen.pl>"]
+edition = "2018"
+
+[lib]
+name = "nvcuda"
+crate-type = ["cdylib"]
+
+[features]
+rocm5 = ["zluda/rocm5"]
+nightly = ["zluda/nightly"]
+
+[dependencies]
+zluda = { path = "../zluda" }
+
+[package.metadata.zluda]
+linux_names = ["libcuda.so", "libcuda.so.1"]
+skip_dump_link = true

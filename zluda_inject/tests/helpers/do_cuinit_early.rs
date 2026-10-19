@@ -1,6 +1,6 @@
 #![crate_type = "bin"]
 
-#[link(name = "do_cuinit", kind = "raw-dylib")]
+#[link(name = "do_cuinit")]
 extern "system" {
     fn do_cuinit(flags: u32) -> u32;
 }

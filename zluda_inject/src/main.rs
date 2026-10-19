@@ -2,8 +2,6 @@
 #[cfg(target_os = "windows")]
 mod win;
 #[cfg(target_os = "windows")]
-mod args;
-#[cfg(target_os = "windows")]
 mod bin;
 
 #[cfg(target_os = "windows")]

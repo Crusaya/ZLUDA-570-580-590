@@ -1,217 +1,53 @@
-use cuda_types::cuda::CUerror;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-pub(crate) mod r#impl;
-#[cfg_attr(windows, path = "os_win.rs")]
-#[cfg_attr(not(windows), path = "os_unix.rs")]
-mod os;
-
-static INITIALIZED: AtomicBool = AtomicBool::new(true);
-pub(crate) fn initialized() -> bool {
-    INITIALIZED.load(Ordering::SeqCst)
-}
-
-#[cfg_attr(not(windows), dtor::dtor)]
-fn deinitialize() {
-    INITIALIZED.store(false, Ordering::SeqCst);
-}
-
-macro_rules! unimplemented {
-    ($($abi:literal fn $fn_name:ident( $($arg_id:ident : $arg_type:ty),* ) -> $ret_type:ty;)*) => {
-        $(
-            #[cfg_attr(not(test), no_mangle)]
-            #[allow(improper_ctypes)]
-            #[allow(improper_ctypes_definitions)]
-            #[allow(unused_variables)]
-            pub unsafe extern $abi fn $fn_name ( $( $arg_id : $arg_type),* ) -> $ret_type {
-                Err(r#impl::unimplemented())
-            }
-        )*
-    };
-}
-
-macro_rules! implemented {
-    ($($abi:literal fn $fn_name:ident( $($arg_id:ident : $arg_type:ty),* ) -> $ret_type:ty;)*) => {
-        $(
-            #[cfg_attr(not(test), no_mangle)]
-            #[allow(improper_ctypes)]
-            #[allow(improper_ctypes_definitions)]
-            pub unsafe extern $abi fn $fn_name ( $( $arg_id : $arg_type),* ) -> $ret_type {
-                if !initialized() {
-                    return Err(CUerror::DEINITIALIZED);
-                }
-                cuda_macros::cuda_normalize_fn!( crate::r#impl::$fn_name ) ($(zluda_common::FromCuda::<_, CUerror>::from_cuda(&$arg_id)?),*)?;
-                Ok(())
-            }
-        )*
-    };
-}
-
-macro_rules! implemented_in_function {
-    ($($abi:literal fn $fn_name:ident( $($arg_id:ident : $arg_type:ty),* ) -> $ret_type:ty;)*) => {
-        $(
-            #[cfg_attr(not(test), no_mangle)]
-            #[allow(improper_ctypes)]
-            #[allow(improper_ctypes_definitions)]
-            pub unsafe extern $abi fn $fn_name ( $( $arg_id : $arg_type),* ) -> $ret_type {
-                if !initialized() {
-                    return Err(CUerror::DEINITIALIZED);
-                }
-                cuda_macros::cuda_normalize_fn!( crate::r#impl::function::$fn_name ) ($(zluda_common::FromCuda::<_, CUerror>::from_cuda(&$arg_id)?),*)?;
-                Ok(())
-            }
-        )*
-    };
-}
-
-cuda_macros::cuda_function_declarations!(
-    unimplemented,
-    implemented
-        <= [
-            cuArray3DCreate_v2,
-            cuArrayCreate_v2,
-            cuArrayDestroy,
-            cuCtxCreate_v2,
-            cuCtxCreate_v4,
-            cuCtxDestroy_v2,
-            cuCtxGetApiVersion,
-            cuCtxGetCurrent,
-            cuCtxGetDevice_v2,
-            cuCtxGetDevice,
-            cuCtxGetLimit,
-            cuCtxGetStreamPriorityRange,
-            cuCtxPopCurrent_v2,
-            cuCtxPopCurrent,
-            cuCtxPushCurrent_v2,
-            cuCtxPushCurrent,
-            cuCtxSetCurrent,
-            cuCtxSetCacheConfig,
-            cuCtxSetFlags,
-            cuCtxSetLimit,
-            cuCtxSynchronize_v2,
-            cuCtxSynchronize,
-            cuDeviceCanAccessPeer,
-            cuDeviceComputeCapability,
-            cuDeviceGet,
-            cuDeviceGetAttribute,
-            cuDeviceGetCount,
-            cuDeviceGetLuid,
-            cuDeviceGetName,
-            cuDeviceGetPCIBusId,
-            cuDeviceGetProperties,
-            cuDeviceGetUuid_v2,
-            cuDeviceGetUuid,
-            cuDevicePrimaryCtxGetState,
-            cuDevicePrimaryCtxRelease_v2,
-            cuDevicePrimaryCtxRelease,
-            cuDevicePrimaryCtxReset,
-            cuDevicePrimaryCtxRetain,
-            cuDevicePrimaryCtxSetFlags_v2,
-            cuDevicePrimaryCtxSetFlags,
-            cuDeviceTotalMem_v2,
-            cuDriverGetVersion,
-            cuEventCreate,
-            cuEventDestroy_v2,
-            cuEventElapsedTime_v2,
-            cuEventElapsedTime,
-            cuEventQuery,
-            cuEventRecord,
-            cuEventRecordWithFlags,
-            cuEventSynchronize,
-            cuFuncGetAttribute,
-            cuFuncSetAttribute,
-            cuFuncSetCacheConfig,
-            cuGetErrorString,
-            cuGetExportTable,
-            cuGetProcAddress_v2,
-            cuGetProcAddress,
-            cuGraphDestroy,
-            cuGraphExecDestroy,
-            cuGraphExecUpdate_v2,
-            cuGraphGetNodes,
-            cuGraphInstantiateWithFlags,
-            cuGraphLaunch,
-            cuInit,
-            cuKernelGetAttribute,
-            cuKernelGetFunction,
-            cuKernelSetAttribute,
-            cuLaunchKernel,
-            cuLaunchKernelEx,
-            cuLibraryGetGlobal,
-            cuLibraryGetKernel,
-            cuLibraryGetModule,
-            cuLibraryLoadData,
-            cuLibraryUnload,
-            cuMemAlloc_v2,
-            cuMemAllocPitch_v2,
-            cuMemcpy2D_v2,
-            cuMemcpy2DUnaligned_v2,
-            cuMemcpy3D_v2,
-            cuMemcpyAsync,
-            cuMemcpyDtoD_v2,
-            cuMemcpyDtoDAsync_v2,
-            cuMemcpyDtoH_v2_ptds,
-            cuMemcpyDtoH_v2,
-            cuMemcpyDtoHAsync_v2,
-            cuMemcpyHtoA_v2,
-            cuMemcpyHtoD_v2_ptds,
-            cuMemcpyHtoD_v2,
-            cuMemcpyHtoDAsync_v2,
-            cuMemFree_v2,
-            cuMemFreeHost,
-            cuMemGetAddressRange_v2,
-            cuMemGetAllocationGranularity,
-            cuMemGetInfo_v2,
-            cuMemHostAlloc,
-            cuMemHostGetDevicePointer_v2,
-            cuMemRetainAllocationHandle,
-            cuMemsetD16_v2,
-            cuMemsetD16Async,
-            cuMemsetD2D32_v2,
-            cuMemsetD2D32Async,
-            cuMemsetD32_v2,
-            cuMemsetD32Async,
-            cuMemsetD8_v2,
-            cuMemsetD8Async,
-            cuModuleGetFunction,
-            cuModuleGetGlobal_v2,
-            cuModuleGetLoadingMode,
-            cuModuleGetSurfRef,
-            cuModuleGetTexRef,
-            cuModuleLoad,
-            cuModuleLoadData,
-            cuModuleLoadDataEx,
-            cuModuleLoadFatBinary,
-            cuModuleUnload,
-            cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags,
-            cuOccupancyMaxPotentialBlockSize,
-            cuPointerGetAttribute,
-            cuPointerGetAttributes,
-            cuProfilerStart,
-            cuProfilerStop,
-            cuStreamBeginCapture_v2,
-            cuStreamCreate,
-            cuStreamCreateWithPriority,
-            cuStreamDestroy_v2,
-            cuStreamEndCapture,
-            cuStreamGetCaptureInfo_v2,
-            cuStreamGetCaptureInfo_v3,
-            cuStreamIsCapturing,
-            cuStreamQuery,
-            cuStreamSynchronize,
-            cuStreamWaitEvent,
-            cuTexObjectCreate,
-            cuTexObjectDestroy,
-            cuTexRefSetAddress_v2,
-            cuTexRefSetAddressMode,
-            cuTexRefSetArray,
-            cuTexRefSetFilterMode,
-            cuTexRefSetFlags,
-            cuTexRefSetFormat,
-            cuThreadExchangeStreamCaptureMode,
-        ],
-    implemented_in_function <= [cuLaunchKernel,]
-);
-
+extern crate lazy_static;
 #[cfg(test)]
-mod tests;
+extern crate paste;
+extern crate ptx;
+
+#[allow(warnings)]
+pub mod cuda;
+pub(crate) mod r#impl;
+
+use crate::r#impl::LiveCheck;
+use cuda_types::CUresult;
+use hip_common::zluda_ext::{CudaObjectKind, CudaResult};
+use r#impl::{context, stream};
+
+const DRIVER_VERSION: i32 = 12040;
+
+#[no_mangle]
+pub unsafe extern "C" fn zluda_get_hip_object(
+    cuda_object: *mut std::os::raw::c_void,
+    kind: CudaObjectKind,
+) -> CudaResult<*const std::os::raw::c_void> {
+    unsafe fn zluda_get_hip_object_impl(
+        cuda_object: *const std::os::raw::c_void,
+        kind: CudaObjectKind,
+    ) -> Result<*const std::os::raw::c_void, CUresult> {
+        match kind {
+            CudaObjectKind::Context => {
+                let cuda_object = cuda_object as *mut context::Context;
+                let ctx = LiveCheck::as_result(cuda_object)?;
+                Ok(ctx.device as usize as _)
+            }
+            CudaObjectKind::Stream => {
+                let cuda_object = cuda_object as *mut stream::Stream;
+                let stream = stream::as_hip_stream(cuda_object)?;
+                Ok(stream as _)
+            }
+        }
+    }
+    zluda_get_hip_object_impl(cuda_object, kind).into()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn zluda_get_version() -> *const std::os::raw::c_char {
+    return env!("VERGEN_GIT_SHA").as_ptr() as _;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn zluda_get_nightly_flag() -> std::os::raw::c_int {
+    #[cfg(feature = "nightly")]
+    return 1;
+    #[cfg(not(feature = "nightly"))]
+    return 0;
+}

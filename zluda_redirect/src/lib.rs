@@ -1,238 +1,184 @@
 #![cfg(target_os = "windows")]
 
+extern crate detours_sys;
+extern crate winapi;
+
+use std::{ffi::c_void, mem, path::PathBuf, ptr, slice, usize};
+
 use detours_sys::{
-    DetourAttach, DetourCopyPayloadToProcess, DetourDetach, DetourRestoreAfterWith,
-    DetourTransactionAbort, DetourTransactionBegin, DetourTransactionCommit,
-    DetourUpdateProcessWithDll, DetourUpdateThread, LPCWSTR,
+    DetourAttach, DetourRestoreAfterWith, DetourTransactionAbort, DetourTransactionBegin,
+    DetourTransactionCommit, DetourUpdateProcessWithDll, DetourUpdateThread,
 };
-use rustc_hash::FxHashMap;
-use std::collections::hash_map;
-use std::ffi::{CStr, CString};
-use std::iter::Peekable;
-use std::path;
-use std::sync::{Mutex, OnceLock};
-use std::{ffi::c_void, mem, ptr, slice, usize};
-use widestring::{U16CStr, U16CString};
-use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, NTSTATUS, STATUS_INVALID_PARAMETER_3, UNICODE_STRING,
+use wchar::wch;
+use winapi::{
+    shared::minwindef::{BOOL, LPVOID},
+    um::{
+        handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
+        libloaderapi::{
+            FindResourceW, GetModuleFileNameW, GetModuleHandleA, GetModuleHandleW, LoadResource,
+        },
+        minwinbase::LPSECURITY_ATTRIBUTES,
+        processthreadsapi::{
+            CreateProcessA, GetCurrentProcessId, GetCurrentThreadId, OpenThread, ResumeThread,
+            SuspendThread, TerminateProcess, LPPROCESS_INFORMATION, LPSTARTUPINFOA, LPSTARTUPINFOW,
+        },
+        sysinfoapi::GetSystemDirectoryA,
+        tlhelp32::{
+            CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+        },
+        winbase::CREATE_SUSPENDED,
+        winnt::{LPSTR, LPWSTR, THREAD_SUSPEND_RESUME},
+        winuser::{MAKEINTRESOURCEW, RT_VERSION},
+    },
 };
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+use winapi::{
+    shared::minwindef::{DWORD, FALSE, HMODULE, TRUE},
+    um::{libloaderapi::LoadLibraryExA, winnt::LPCSTR},
 };
-use windows::Win32::System::Threading::{
-    GetCurrentProcessId, GetCurrentThread, GetCurrentThreadId, OpenThread, ResumeThread,
-    SuspendThread, TerminateProcess, THREAD_SUSPEND_RESUME,
+use winapi::{
+    shared::minwindef::{FARPROC, HINSTANCE},
+    um::{
+        libloaderapi::GetProcAddress,
+        processthreadsapi::{CreateProcessAsUserW, CreateProcessW},
+        winbase::{CreateProcessWithLogonW, CreateProcessWithTokenW},
+        winnt::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH, HANDLE, LPCWSTR},
+    },
 };
-use windows_sys::core::{BOOL, PCSTR, PCWSTR, PSTR, PWSTR};
-use windows_sys::Win32::Foundation::{FALSE, FARPROC, NO_ERROR, TRUE};
-use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-use windows_sys::Win32::System::LibraryLoader::{
-    GetProcAddress, LoadLibraryExA, LoadLibraryExW, LOAD_LIBRARY_FLAGS,
+use winapi::{
+    shared::winerror::NO_ERROR,
+    um::libloaderapi::{LoadLibraryA, LoadLibraryExW, LoadLibraryW},
 };
-use windows_sys::Win32::System::Threading::{
-    CreateProcessA, CreateProcessAsUserA, CreateProcessAsUserW, CreateProcessW,
-    CreateProcessWithLogonW, CreateProcessWithTokenW,
-};
-use windows_sys::Win32::{
-    Foundation::HMODULE,
-    System::LibraryLoader::{LoadLibraryA, LoadLibraryW},
-};
-use zluda_windows::{DllLookup, LIBRARIES};
 
-static mut DETOUR_DROP: Option<DetourDetachGuard> = None;
-static mut DETOUR_PATHS: Option<DetourPaths> = None;
-static mut SELF_PATH: Option<CString> = None;
+include!("payload_guid.rs");
 
-struct DetourPaths {
-    lookup: DllLookup,
-    override_paths: [Option<(&'static CStr, Vec<u16>)>; zluda_windows::LIBRARIES.len()],
-}
+const WIN_MAX_PATH: usize = 260;
+const NVCUDA1_UTF8: &'static str = "NVCUDA.DLL";
+const NVCUDA1_UTF16: &[u16] = wch!("NVCUDA.DLL");
+const NVCUDA2_UTF8: &'static str = "NVCUDA.DLL";
+const NVCUDA2_UTF16: &[u16] = wch!("NVCUDA.DLL");
+const NVML_UTF8: &'static str = "NVML.DLL";
+const NVML_UTF16: &[u16] = wch!("NVML.DLL");
+const NVAPI_UTF8: &'static str = "NVAPI64.DLL";
+const NVAPI_UTF16: &[u16] = wch!("NVAPI64.DLL");
+const NVOPTIX_UTF8: &'static str = "OPTIX.6.6.0.DLL";
+const NVOPTIX_UTF16: &[u16] = wch!("OPTIX.6.6.0.DLL");
+static mut ZLUDA_PATH_UTF8: Option<&'static [u8]> = None;
+static mut ZLUDA_PATH_UTF16: Vec<u16> = Vec::new();
+static mut ZLUDA_ML_PATH_UTF8: Option<&'static [u8]> = None;
+static mut ZLUDA_ML_PATH_UTF16: Vec<u16> = Vec::new();
+static mut ZLUDA_API_PATH_UTF8: Option<&'static [u8]> = None;
+static mut ZLUDA_API_PATH_UTF16: Option<Vec<u16>> = None;
+static mut ZLUDA_OPTIX_PATH_UTF8: Option<&'static [u8]> = None;
+static mut ZLUDA_OPTIX_PATH_UTF16: Option<Vec<u16>> = None;
+static mut DRIVERSTORE_UTF8: Vec<u8> = Vec::new();
+static mut DRIVERSTORE_UTF16: Vec<u16> = Vec::new();
+static mut CURRENT_MODULE_FILENAME: Vec<u8> = Vec::new();
+static mut DETOUR_STATE: Option<DetourDetachGuard> = None;
 
-impl DetourPaths {
-    fn new() -> Self {
-        let lookup = DllLookup::new();
-        let paths = zluda_windows::LIBRARIES.each_ref().map(|lib| {
-            get_payload(unsafe { mem::transmute(&lib.guid) }).map(|payload| {
-                let utf8 = unsafe { CStr::from_bytes_with_nul_unchecked(payload) };
-                let utf16 =
-                    unsafe { U16CString::from_str_unchecked(utf8.to_string_lossy()) }.into_vec();
-                (utf8, utf16)
-            })
-        });
-        DetourPaths {
-            lookup,
-            override_paths: paths,
-        }
-    }
+#[no_mangle]
+#[used]
+pub static ZLUDA_REDIRECT: () = ();
 
-    fn ascii_override(this: &Option<Self>, path: *const u8) -> *const u8 {
-        Self::override_impl(
-            this,
-            path,
-            |p| {
-                let cstr = unsafe { CStr::from_ptr(p.cast()) };
-                cstr.to_bytes()
-            },
-            |lookup, buffer| lookup.lookup_ascii(buffer),
-            |(override_ascii, _)| override_ascii.as_ptr().cast(),
-        )
-    }
-
-    fn utf16_override(this: &Option<Self>, path: *const u16) -> *const u16 {
-        Self::override_impl(
-            this,
-            path,
-            |p| {
-                let u16cstr = unsafe { U16CStr::from_ptr_str(p) };
-                u16cstr.as_slice()
-            },
-            |lookup, buffer| lookup.lookup_utf16(buffer),
-            |(_, override_utf16)| override_utf16.as_ptr(),
-        )
-    }
-
-    fn override_impl<T: 'static>(
-        this: &Option<Self>,
-        path: *const T,
-        get_buffer: impl FnOnce(*const T) -> &'static [T],
-        lookup: impl FnOnce(&DllLookup, &[T]) -> Option<usize>,
-        get_pointer: impl FnOnce(&(&'static CStr, Vec<u16>)) -> *const T,
-    ) -> *const T {
-        this.as_ref()
-            .map(|this| {
-                let buffer = get_buffer(path);
-                let index = lookup(&this.lookup, buffer);
-                index
-                    .map(|index| this.override_paths[index].as_ref().map(|p| get_pointer(p)))
-                    .flatten()
-            })
-            .flatten()
-            .unwrap_or(path)
-    }
-}
-
-#[link(name = "ntdll.dll", kind = "raw-dylib")]
-unsafe extern "system" {
-    fn LdrLoadDll(
-        dll_path: LPCWSTR,
-        dll_characteristics: *mut u32,
-        dll_name: *const UNICODE_STRING,
-        dll_handle: *mut detours_sys::PVOID,
-    ) -> NTSTATUS;
-}
-
-static mut LDR_LOAD_DLL: unsafe extern "system" fn(
-    LPCWSTR,
-    *mut u32,
-    *const UNICODE_STRING,
-    *mut detours_sys::PVOID,
-) -> NTSTATUS = LdrLoadDll;
-
-static mut LOAD_LIBRARY_A: unsafe extern "system" fn(lp_lib_file_name: PCSTR) -> HMODULE =
+#[allow(non_snake_case)]
+static mut LOAD_LIBRARY_A: unsafe extern "system" fn(lpLibFileName: LPCSTR) -> HMODULE =
     LoadLibraryA;
 
-static mut LOAD_LIBRARY_W: unsafe extern "system" fn(lp_lib_file_name: PCWSTR) -> HMODULE =
+#[allow(non_snake_case)]
+static mut LOAD_LIBRARY_W: unsafe extern "system" fn(lpLibFileName: LPCWSTR) -> HMODULE =
     LoadLibraryW;
 
+#[allow(non_snake_case)]
 static mut LOAD_LIBRARY_EX_A: unsafe extern "system" fn(
-    lp_lib_file_name: PCSTR,
-    file: windows_sys::Win32::Foundation::HANDLE,
-    flags: LOAD_LIBRARY_FLAGS,
+    lpLibFileName: LPCSTR,
+    hFile: HANDLE,
+    dwFlags: DWORD,
 ) -> HMODULE = LoadLibraryExA;
 
+#[allow(non_snake_case)]
 static mut LOAD_LIBRARY_EX_W: unsafe extern "system" fn(
-    lp_lib_file_name: LPCWSTR,
-    file: windows_sys::Win32::Foundation::HANDLE,
-    flags: LOAD_LIBRARY_FLAGS,
+    lpLibFileName: LPCWSTR,
+    hFile: HANDLE,
+    dwFlags: DWORD,
 ) -> HMODULE = LoadLibraryExW;
 
+#[allow(non_snake_case)]
 static mut CREATE_PROCESS_A: unsafe extern "system" fn(
-    lpapplicationname: PCSTR,
-    lpcommandline: PSTR,
-    lpprocessattributes: *const SECURITY_ATTRIBUTES,
-    lpthreadattributes: *const SECURITY_ATTRIBUTES,
-    binherithandles: BOOL,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOA,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    lpApplicationName: LPCSTR,
+    lpCommandLine: LPSTR,
+    lpProcessAttributes: LPSECURITY_ATTRIBUTES,
+    lpThreadAttributes: LPSECURITY_ATTRIBUTES,
+    bInheritHandles: BOOL,
+    dwCreationFlags: DWORD,
+    lpEnvironment: LPVOID,
+    lpCurrentDirectory: LPCSTR,
+    lpStartupInfo: LPSTARTUPINFOA,
+    lpProcessInformation: LPPROCESS_INFORMATION,
 ) -> BOOL = CreateProcessA;
 
+#[allow(non_snake_case)]
 static mut CREATE_PROCESS_W: unsafe extern "system" fn(
-    lpapplicationname: PCWSTR,
-    lpcommandline: PWSTR,
-    lpprocessattributes: *const SECURITY_ATTRIBUTES,
-    lpthreadattributes: *const SECURITY_ATTRIBUTES,
-    binherithandles: BOOL,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCWSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOW,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    lpApplicationName: LPCWSTR,
+    lpCommandLine: LPWSTR,
+    lpProcessAttributes: LPSECURITY_ATTRIBUTES,
+    lpThreadAttributes: LPSECURITY_ATTRIBUTES,
+    bInheritHandles: BOOL,
+    dwCreationFlags: DWORD,
+    lpEnvironment: LPVOID,
+    lpCurrentDirectory: LPCWSTR,
+    lpStartupInfo: LPSTARTUPINFOW,
+    lpProcessInformation: LPPROCESS_INFORMATION,
 ) -> BOOL = CreateProcessW;
 
-static mut CREATE_PROCESS_AS_USER_A: unsafe extern "system" fn(
-    htoken: windows_sys::Win32::Foundation::HANDLE,
-    lpapplicationname: PCSTR,
-    lpcommandline: PSTR,
-    lpprocessattributes: *const SECURITY_ATTRIBUTES,
-    lpthreadattributes: *const SECURITY_ATTRIBUTES,
-    binherithandles: BOOL,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOA,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
-) -> BOOL = CreateProcessAsUserA;
-
+#[allow(non_snake_case)]
 static mut CREATE_PROCESS_AS_USER_W: unsafe extern "system" fn(
-    htoken: windows_sys::Win32::Foundation::HANDLE,
-    lpapplicationname: PCWSTR,
-    lpcommandline: PWSTR,
-    lpprocessattributes: *const SECURITY_ATTRIBUTES,
-    lpthreadattributes: *const SECURITY_ATTRIBUTES,
-    binherithandles: BOOL,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCWSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOW,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    hToken: HANDLE,
+    lpApplicationName: LPCWSTR,
+    lpCommandLine: LPWSTR,
+    lpProcessAttributes: LPSECURITY_ATTRIBUTES,
+    lpThreadAttributes: LPSECURITY_ATTRIBUTES,
+    bInheritHandles: BOOL,
+    dwCreationFlags: DWORD,
+    lpEnvironment: LPVOID,
+    lpCurrentDirectory: LPCWSTR,
+    lpStartupInfo: LPSTARTUPINFOW,
+    lpProcessInformation: LPPROCESS_INFORMATION,
 ) -> BOOL = CreateProcessAsUserW;
 
+#[allow(non_snake_case)]
 static mut CREATE_PROCESS_WITH_TOKEN_W: unsafe extern "system" fn(
-    htoken: windows_sys::Win32::Foundation::HANDLE,
-    dwlogonflags: windows_sys::Win32::System::Threading::CREATE_PROCESS_LOGON_FLAGS,
-    lpapplicationname: PCWSTR,
-    lpcommandline: PWSTR,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCWSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOW,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    hToken: HANDLE,
+    dwLogonFlags: DWORD,
+    lpApplicationName: LPCWSTR,
+    lpCommandLine: LPWSTR,
+    dwCreationFlags: DWORD,
+    lpEnvironment: LPVOID,
+    lpCurrentDirectory: LPCWSTR,
+    lpStartupInfo: LPSTARTUPINFOW,
+    lpProcessInformation: LPPROCESS_INFORMATION,
 ) -> BOOL = CreateProcessWithTokenW;
 
+#[allow(non_snake_case)]
 static mut CREATE_PROCESS_WITH_LOGON_W: unsafe extern "system" fn(
-    lpusername: PCWSTR,
-    lpdomain: PCWSTR,
-    lppassword: PCWSTR,
-    dwlogonflags: windows_sys::Win32::System::Threading::CREATE_PROCESS_LOGON_FLAGS,
-    lpapplicationname: PCWSTR,
-    lpcommandline: PWSTR,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCWSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOW,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    lpUsername: LPCWSTR,
+    lpDomain: LPCWSTR,
+    lpPassword: LPCWSTR,
+    dwLogonFlags: DWORD,
+    lpApplicationName: LPCWSTR,
+    lpCommandLine: LPWSTR,
+    dwCreationFlags: DWORD,
+    lpEnvironment: LPVOID,
+    lpCurrentDirectory: LPCWSTR,
+    lpStartupInfo: LPSTARTUPINFOW,
+    lpProcessInformation: LPPROCESS_INFORMATION,
 ) -> BOOL = CreateProcessWithLogonW;
 
 #[no_mangle]
 #[allow(non_snake_case)]
 unsafe extern "system" fn ZludaGetProcAddress_NoRedirect(
-    hmodule: HMODULE,
-    lpprocname: PCSTR,
+    hModule: HMODULE,
+    lpProcName: LPCSTR,
 ) -> FARPROC {
-    GetProcAddress(hmodule, lpprocname)
+    GetProcAddress(hModule, lpProcName)
 }
 
 #[no_mangle]
@@ -242,507 +188,374 @@ unsafe extern "system" fn ZludaLoadLibraryW_NoRedirect(lpLibFileName: LPCWSTR) -
 }
 
 #[allow(non_snake_case)]
-unsafe extern "system" fn ZludaLoadLibraryA(file_name: PCSTR) -> HMODULE {
-    LOAD_LIBRARY_A(DetourPaths::ascii_override(
-        &*&raw const DETOUR_PATHS,
-        file_name,
-    ))
+unsafe extern "system" fn ZludaLoadLibraryA(lpLibFileName: LPCSTR) -> HMODULE {
+    let library_name = get_library_name_utf8(lpLibFileName as _);
+    (LOAD_LIBRARY_A)(library_name as _)
+}
+
+unsafe fn get_library_name_utf8(raw_library_name: *const u8) -> *const u8 {
+    let library_name = zero_terminated(raw_library_name);
+    if is_driverstore_utf8(library_name) {
+        if let Some(last_separator) = library_name
+            .iter()
+            .copied()
+            .rposition(|c| c as char == '\\' || c as char == '/')
+        {
+            let existing_module =
+                GetModuleHandleA(library_name[last_separator + 1..].as_ptr() as _);
+            if probably_is_nvidia_dll(existing_module) {
+                return raw_library_name;
+            }
+        }
+    }
+    if is_nvcuda_dll_utf8(library_name) {
+        return ZLUDA_PATH_UTF8.unwrap().as_ptr();
+    } else if is_nvml_dll_utf8(library_name) {
+        return ZLUDA_ML_PATH_UTF8.unwrap().as_ptr();
+    } else {
+        if let Some(nvapi_path) = ZLUDA_API_PATH_UTF8 {
+            if is_nvapi_dll_utf8(library_name) {
+                return nvapi_path.as_ptr();
+            }
+        }
+        if let Some(optix_path) = ZLUDA_OPTIX_PATH_UTF8 {
+            if is_nvoptix_dll_utf8(library_name) {
+                return optix_path.as_ptr();
+            }
+        }
+    };
+    raw_library_name
 }
 
 #[allow(non_snake_case)]
-unsafe extern "system" fn ZludaLoadLibraryW(file_name: LPCWSTR) -> HMODULE {
-    LOAD_LIBRARY_W(DetourPaths::utf16_override(
-        &*&raw const DETOUR_PATHS,
-        file_name,
-    ))
+unsafe extern "system" fn ZludaLoadLibraryW(lpLibFileName: LPCWSTR) -> HMODULE {
+    let library_name = get_library_name_utf16(lpLibFileName);
+    (LOAD_LIBRARY_W)(library_name)
+}
+
+#[allow(static_mut_refs)]
+unsafe fn get_library_name_utf16(raw_library_name: *const u16) -> *const u16 {
+    let library_name = zero_terminated(raw_library_name);
+    if is_driverstore_utf16(library_name) {
+        if let Some(last_separator) = library_name.iter().copied().rposition(|c| {
+            char::from_u32(c as u32).unwrap_or_default() == '\\'
+                || char::from_u32(c as u32).unwrap_or_default() == '/'
+        }) {
+            let existing_module = GetModuleHandleW(library_name[last_separator + 1..].as_ptr());
+            if probably_is_nvidia_dll(existing_module) {
+                return raw_library_name;
+            }
+        }
+    }
+    if is_nvcuda_dll_utf16(library_name) {
+        return ZLUDA_PATH_UTF16.as_ptr();
+    } else if is_nvml_dll_utf16(library_name) {
+        return ZLUDA_ML_PATH_UTF16.as_ptr();
+    } else {
+        if let Some(nvapi_path) = ZLUDA_API_PATH_UTF16.as_ref() {
+            if is_nvapi_dll_utf16(library_name) {
+                return nvapi_path.as_ptr();
+            }
+        }
+        if let Some(optix_path) = ZLUDA_OPTIX_PATH_UTF16.as_ref() {
+            if is_nvoptix_dll_utf16(library_name) {
+                return optix_path.as_ptr();
+            }
+        }
+    };
+    raw_library_name
+}
+
+unsafe fn probably_is_nvidia_dll(module: HMODULE) -> bool {
+    if module == ptr::null_mut() {
+        return false;
+    }
+    let resource_handle = FindResourceW(module, MAKEINTRESOURCEW(1), RT_VERSION);
+    if resource_handle == ptr::null_mut() {
+        return false;
+    }
+    let resource = LoadResource(module, resource_handle);
+    if resource == ptr::null_mut() {
+        return false;
+    }
+    let version_len = *(resource as *mut u16);
+    let resource_slice = slice::from_raw_parts(resource as *const u8, version_len as usize);
+    let key = wch!("NVIDIA");
+    memchr::memmem::find(resource_slice, key.align_to::<u8>().1).is_some()
 }
 
 #[allow(non_snake_case)]
 unsafe extern "system" fn ZludaLoadLibraryExA(
-    file_name: PCSTR,
-    hfile: windows_sys::Win32::Foundation::HANDLE,
-    dwflags: LOAD_LIBRARY_FLAGS,
+    lpLibFileName: LPCSTR,
+    hFile: HANDLE,
+    dwFlags: DWORD,
 ) -> HMODULE {
-    LOAD_LIBRARY_EX_A(
-        DetourPaths::ascii_override(&*&raw const DETOUR_PATHS, file_name),
-        hfile,
-        dwflags,
-    )
+    let library_name = get_library_name_utf8(lpLibFileName as _);
+    (LOAD_LIBRARY_EX_A)(library_name as _, hFile, dwFlags)
 }
 
 #[allow(non_snake_case)]
 unsafe extern "system" fn ZludaLoadLibraryExW(
-    file_name: PCWSTR,
-    hfile: windows_sys::Win32::Foundation::HANDLE,
-    dwflags: LOAD_LIBRARY_FLAGS,
+    lpLibFileName: LPCWSTR,
+    hFile: HANDLE,
+    dwFlags: DWORD,
 ) -> HMODULE {
-    LOAD_LIBRARY_EX_W(
-        DetourPaths::utf16_override(&*&raw const DETOUR_PATHS, file_name),
-        hfile,
-        dwflags,
+    let library_name = get_library_name_utf16(lpLibFileName);
+    (LOAD_LIBRARY_EX_W)(library_name, hFile, dwFlags)
+}
+
+unsafe fn zero_terminated<T: Default + PartialEq>(t: *const T) -> &'static [T] {
+    let mut len = 0;
+    loop {
+        if *t.add(len) == T::default() {
+            break;
+        }
+        len += 1;
+    }
+    std::slice::from_raw_parts(t, len)
+}
+
+unsafe fn is_driverstore_utf8(lib: &[u8]) -> bool {
+    starts_with_ignore_case(
+        lib,
+        (&raw const DRIVERSTORE_UTF8).as_ref().unwrap_unchecked(),
+        utf8_to_ascii_uppercase,
     )
+}
+
+unsafe fn is_driverstore_utf16(lib: &[u16]) -> bool {
+    starts_with_ignore_case(
+        lib,
+        (&raw const DRIVERSTORE_UTF16).as_ref().unwrap_unchecked(),
+        utf16_to_ascii_uppercase,
+    )
+}
+
+fn is_nvcuda_dll_utf8(lib: &[u8]) -> bool {
+    is_dll_utf8(lib, NVCUDA1_UTF8.as_bytes()) || is_dll_utf8(lib, NVCUDA2_UTF8.as_bytes())
+}
+
+fn is_nvcuda_dll_utf16(lib: &[u16]) -> bool {
+    is_dll_utf16(lib, NVCUDA1_UTF16) || is_dll_utf16(lib, NVCUDA2_UTF16)
+}
+
+fn is_nvml_dll_utf8(lib: &[u8]) -> bool {
+    is_dll_utf8(lib, NVML_UTF8.as_bytes())
+}
+
+fn is_nvml_dll_utf16(lib: &[u16]) -> bool {
+    is_dll_utf16(lib, NVML_UTF16)
+}
+
+fn is_nvapi_dll_utf8(lib: &[u8]) -> bool {
+    is_dll_utf8(lib, NVAPI_UTF8.as_bytes())
+}
+
+fn is_nvapi_dll_utf16(lib: &[u16]) -> bool {
+    is_dll_utf16(lib, NVAPI_UTF16)
+}
+
+fn is_nvoptix_dll_utf8(lib: &[u8]) -> bool {
+    is_dll_utf8(lib, NVOPTIX_UTF8.as_bytes())
+}
+
+fn is_nvoptix_dll_utf16(lib: &[u16]) -> bool {
+    is_dll_utf16(lib, NVOPTIX_UTF16)
+}
+
+fn is_dll_utf8(lib: &[u8], name: &[u8]) -> bool {
+    ends_with_ignore_case(lib, name, utf8_to_ascii_uppercase)
+}
+
+fn is_dll_utf16(lib: &[u16], name: &[u16]) -> bool {
+    ends_with_ignore_case(lib, name, utf16_to_ascii_uppercase)
+}
+
+fn utf8_to_ascii_uppercase(c: u8) -> u8 {
+    c.to_ascii_uppercase()
+}
+
+fn utf16_to_ascii_uppercase(c: u16) -> u16 {
+    if c >= 'a' as u16 && c <= 'z' as u16 {
+        c - 32
+    } else {
+        c
+    }
+}
+
+fn ends_with_ignore_case<T: Copy + PartialEq>(
+    haystack: &[T],
+    needle: &[T],
+    uppercase: impl Fn(T) -> T,
+) -> bool {
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    let offset = haystack.len() - needle.len();
+    for i in 0..needle.len() {
+        if uppercase(haystack[offset + i]) != needle[i] {
+            return false;
+        }
+    }
+    true
+}
+
+fn starts_with_ignore_case<T: Copy + PartialEq>(
+    haystack: &[T],
+    needle: &[T],
+    uppercase: impl Fn(T) -> T,
+) -> bool {
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    for i in 0..needle.len() {
+        if uppercase(haystack[i]) != needle[i] {
+            return false;
+        }
+    }
+    true
 }
 
 #[allow(non_snake_case)]
 unsafe extern "system" fn ZludaCreateProcessA(
-    lpapplicationname: PCSTR,
-    lpcommandline: PSTR,
-    lpprocessattributes: *const SECURITY_ATTRIBUTES,
-    lpthreadattributes: *const SECURITY_ATTRIBUTES,
-    binherithandles: BOOL,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOA,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    lpApplicationName: LPCSTR,
+    lpCommandLine: LPSTR,
+    lpProcessAttributes: LPSECURITY_ATTRIBUTES,
+    lpThreadAttributes: LPSECURITY_ATTRIBUTES,
+    bInheritHandles: BOOL,
+    dwCreationFlags: DWORD,
+    lpEnvironment: LPVOID,
+    lpCurrentDirectory: LPCSTR,
+    lpStartupInfo: LPSTARTUPINFOA,
+    lpProcessInformation: LPPROCESS_INFORMATION,
 ) -> BOOL {
-    create_process(
-        dwcreationflags,
-        lpprocessinformation,
-        |creation_flags, proc_info| {
-            CREATE_PROCESS_A(
-                lpapplicationname,
-                lpcommandline,
-                lpprocessattributes,
-                lpthreadattributes,
-                binherithandles,
-                creation_flags,
-                lpenvironment,
-                lpcurrentdirectory,
-                lpstartupinfo,
-                proc_info,
-            )
-        },
-    )
-}
-
-#[allow(non_snake_case)]
-unsafe extern "system" fn ZludaLdrLoadDll(
-    dll_path_arg: LPCWSTR,
-    dll_characteristics: *mut u32,
-    dll_name: *const UNICODE_STRING,
-    dll_handle: *mut detours_sys::PVOID,
-) -> NTSTATUS {
-    let is_nvrtc = is_nvrtc(dll_name).unwrap_or(false);
-    let result = (LDR_LOAD_DLL)(dll_path_arg, dll_characteristics, dll_name, dll_handle);
-    if is_nvrtc && result.is_ok() {
-        detour_nvrtc(*dll_handle);
-    }
-    result
-}
-
-#[allow(non_snake_case)]
-unsafe extern "system" fn Zluda_nvrtcCompileProgram(
-    prog: *const c_void,
-    num_options: std::ffi::c_int,
-    options: *const *const std::ffi::c_char,
-) -> u32 {
-    // TODO:
-    // Right now we pick any one of the detoured nvrtcCompileProgram
-    // functions, but if there are multiple nvrtc instances loaded this will be
-    // incorrect. We should create a thunk for each library, but I don't have
-    // the time right now.
-    let original_fn = {
-        nvrtc_detours()
-            .lock()
-            .ok()
-            .and_then(|nvrtc_detours| nvrtc_detours.values().next().copied())
-    };
-    let nvrtcCompileProgram = match original_fn {
-        Some(original_fn) => original_fn,
-        None => return 11, // NVRTC_ERROR_INTERNAL_ERROR
-    };
-    let old_options = std::slice::from_raw_parts(options, num_options as usize);
-    let mut options = vec![c"-arch=compute_86".as_ptr()];
-    for &option in old_options {
-        if nvrtc::is_arch_option(CStr::from_ptr(option)) {
-            continue;
-        }
-        options.push(option);
-    }
-    (mem::transmute::<
-        _,
-        unsafe extern "system" fn(
-            *const c_void,
-            std::ffi::c_int,
-            *const *const std::ffi::c_char,
-        ) -> u32,
-    >(nvrtcCompileProgram))(prog, options.len() as _, options.as_ptr())
-}
-
-// There might be multiple nvrtc instances loaded,
-// so we need to keep track of which ones we've detoured
-fn nvrtc_detours() -> &'static Mutex<FxHashMap<usize, usize>> {
-    static NVRTC_DETOURS: OnceLock<Mutex<FxHashMap<usize, usize>>> = OnceLock::new();
-    NVRTC_DETOURS.get_or_init(|| Mutex::new(FxHashMap::default()))
-}
-
-unsafe fn detour_nvrtc(handle: *mut c_void) -> Option<()> {
-    let mut nvrtc_detours = nvrtc_detours().lock().ok()?;
-    let nvrtc_entry = match nvrtc_detours.entry(handle as usize) {
-        hash_map::Entry::Occupied(_) => return Some(()),
-        hash_map::Entry::Vacant(entry) => entry,
-    };
-    let get_cubin = GetProcAddress(handle, c"nvrtcGetCUBIN".as_ptr().cast())?;
-    let get_cubin_size = GetProcAddress(handle, c"nvrtcGetCUBINSize".as_ptr().cast())?;
-    let get_ptx = GetProcAddress(handle, c"nvrtcGetPTX".as_ptr().cast())?;
-    let get_ptx_size = GetProcAddress(handle, c"nvrtcGetPTXSize".as_ptr().cast())?;
-    let nvrtc_compile_program = GetProcAddress(handle, c"nvrtcCompileProgram".as_ptr().cast())?;
-    if !apply_detours(
-        nvrtc_entry,
-        get_cubin,
-        get_cubin_size,
-        get_ptx,
-        get_ptx_size,
-        nvrtc_compile_program,
-    ) {
-        DetourTransactionAbort();
-    }
-    Some(())
-}
-
-unsafe fn apply_detours(
-    nvrtc_entry: hash_map::VacantEntry<usize, usize>,
-    mut get_cubin: unsafe extern "system" fn() -> isize,
-    mut get_cubin_size: unsafe extern "system" fn() -> isize,
-    get_ptx: unsafe extern "system" fn() -> isize,
-    get_ptx_size: unsafe extern "system" fn() -> isize,
-    mut nvrtc_compile_program: unsafe extern "system" fn() -> isize,
-) -> bool {
-    if DetourTransactionBegin() != NO_ERROR as i32 {
-        return false;
-    }
-    if DetourUpdateThread(GetCurrentThread().0) != NO_ERROR as i32 {
-        return false;
-    }
-    if DetourAttach(std::ptr::from_mut(&mut get_cubin).cast(), get_ptx as _) != NO_ERROR as i32 {
-        return false;
-    }
-    if DetourAttach(
-        std::ptr::from_mut(&mut get_cubin_size).cast(),
-        get_ptx_size as _,
-    ) != NO_ERROR as i32
-    {
-        return false;
-    }
-    if DetourAttach(
-        std::ptr::from_mut(&mut get_cubin_size).cast(),
-        get_ptx_size as _,
-    ) != NO_ERROR as i32
-    {
-        return false;
-    }
-    if DetourAttach(
-        std::ptr::from_mut(&mut nvrtc_compile_program).cast(),
-        Zluda_nvrtcCompileProgram as _,
-    ) != NO_ERROR as i32
-    {
-        return false;
-    }
-    if DetourTransactionCommit() != NO_ERROR as i32 {
-        return false;
-    }
-    nvrtc_entry.insert(nvrtc_compile_program as usize);
-    true
-}
-
-unsafe fn is_nvrtc(dll_name_arg: *const UNICODE_STRING) -> Result<bool, NTSTATUS> {
-    fn version_segment(iter: &mut Peekable<impl Iterator<Item = u16>>) -> bool {
-        fn is_digit(c: u16) -> bool {
-            char::from_u32(c as u32)
-                .unwrap_or(char::MIN)
-                .is_ascii_digit()
-        }
-        fn parse_digits(iter: &mut Peekable<impl Iterator<Item = u16>>) -> bool {
-            match iter.next() {
-                Some(c) if is_digit(c) => (),
-                _ => return false,
-            }
-            // Remaining digits
-            loop {
-                match iter.peek() {
-                    Some(c) if is_digit(*c) => {
-                        iter.next();
-                    }
-                    _ => break,
-                }
-            }
-            true
-        }
-        if !parse_digits(iter) {
-            return false;
-        }
-        match iter.peek() {
-            Some(c) if *c == '_' as u16 => {
-                iter.next();
-            }
-            _ => return true,
-        }
-        parse_digits(iter)
-    }
-    fn next_str(iter: &mut impl Iterator<Item = u16>, expected: &str) -> bool {
-        for e in expected.chars() {
-            match iter.next() {
-                Some(c) => {
-                    let c = char::from_u32(c as u32).unwrap_or(char::MIN);
-                    if !c.eq_ignore_ascii_case(&e) {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
-        true
-    }
-    let dll_name = dll_name_arg.as_ref().ok_or(STATUS_INVALID_PARAMETER_3)?;
-    let dll_name = slice::from_raw_parts(dll_name.Buffer.0, (dll_name.Length as usize) / 2);
-    let file_name_length = dll_name
-        .into_iter()
-        .copied()
-        .rev()
-        .position(|c| path::is_separator(char::from_u32(c as u32).unwrap_or(char::MIN)));
-    let dll_name = match file_name_length {
-        Some(file_name_length) => dll_name.split_at(dll_name.len() - file_name_length).1,
-        None => dll_name,
-    };
-    let mut dll_name = dll_name.into_iter().copied().peekable();
-    if !next_str(&mut dll_name, "nvrtc64_") {
-        return Ok(false);
-    }
-    if !version_segment(&mut dll_name) {
-        return Ok(false);
-    }
-    if !next_str(&mut dll_name, ".dll") {
-        return Ok(false);
-    }
-    Ok(dll_name.next() == None)
-}
-
-fn create_process(
-    dwcreationflags: u32,
-    source_proc_info: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
-    create_process_underlying: impl Fn(
-        u32,
-        *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
-    ) -> i32,
-) -> BOOL {
-    let detour_paths = match unsafe { &*&raw const DETOUR_PATHS } {
-        Some(paths) => paths,
-        None => return create_process_underlying(dwcreationflags, source_proc_info),
-    };
-    let flags = dwcreationflags | windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
-    let mut proc_info_backup: windows_sys::Win32::System::Threading::PROCESS_INFORMATION =
-        unsafe { mem::zeroed() };
-    let proc_info = unsafe { source_proc_info.as_mut() }.unwrap_or(&mut proc_info_backup);
-    let created = create_process_underlying(flags, proc_info);
-    if created == 0 {
-        return 0;
-    }
-    for (index, paths) in detour_paths.override_paths.iter().enumerate() {
-        let (path_ascii, _) = unwrap_or::unwrap_some_or!(paths, continue);
-        let mut unsafe_path = [path_ascii.as_ptr().cast()];
-        if unsafe { DetourUpdateProcessWithDll(proc_info.hProcess, unsafe_path.as_mut_ptr(), 1) }
-            != 0
-        {
-            let path_bytes = path_ascii.to_bytes_with_nul();
-            unsafe {
-                DetourCopyPayloadToProcess(
-                    proc_info.hProcess,
-                    std::ptr::from_ref(&LIBRARIES[index].guid).cast(),
-                    path_bytes.as_ptr().cast_mut().cast(),
-                    path_bytes.len() as u32,
-                )
-            };
-        }
-    }
-    if let Some(self_path) = unsafe { &*&raw const SELF_PATH } {
-        let mut unsafe_path = [self_path.as_ptr().cast()];
-        unsafe { DetourUpdateProcessWithDll(proc_info.hProcess, unsafe_path.as_mut_ptr(), 1) };
-    }
-    let result = if dwcreationflags & windows_sys::Win32::System::Threading::CREATE_SUSPENDED == 0 {
-        if unsafe { ResumeThread(HANDLE(proc_info.hThread)) } == u32::MAX {
-            unsafe { TerminateProcess(HANDLE(proc_info.hProcess), 1) }.ok();
-            FALSE
-        } else {
-            TRUE
-        }
-    } else {
-        TRUE
-    };
-    if !ptr::eq(proc_info, source_proc_info) {
-        unsafe { CloseHandle(HANDLE(proc_info.hProcess)) }.ok();
-        unsafe { CloseHandle(HANDLE(proc_info.hThread)) }.ok();
-    }
-    result
+    let create_proc_result = CREATE_PROCESS_A(
+        lpApplicationName,
+        lpCommandLine,
+        lpProcessAttributes,
+        lpThreadAttributes,
+        bInheritHandles,
+        dwCreationFlags | CREATE_SUSPENDED,
+        lpEnvironment,
+        lpCurrentDirectory,
+        lpStartupInfo,
+        lpProcessInformation,
+    );
+    continue_create_process_hook(create_proc_result, dwCreationFlags, lpProcessInformation)
 }
 
 #[allow(non_snake_case)]
 unsafe extern "system" fn ZludaCreateProcessW(
-    lpapplicationname: PCWSTR,
-    lpcommandline: PWSTR,
-    lpprocessattributes: *const SECURITY_ATTRIBUTES,
-    lpthreadattributes: *const SECURITY_ATTRIBUTES,
-    binherithandles: BOOL,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCWSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOW,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    lpApplicationName: LPCWSTR,
+    lpCommandLine: LPWSTR,
+    lpProcessAttributes: LPSECURITY_ATTRIBUTES,
+    lpThreadAttributes: LPSECURITY_ATTRIBUTES,
+    bInheritHandles: BOOL,
+    dwCreationFlags: DWORD,
+    lpEnvironment: LPVOID,
+    lpCurrentDirectory: LPCWSTR,
+    lpStartupInfo: LPSTARTUPINFOW,
+    lpProcessInformation: LPPROCESS_INFORMATION,
 ) -> BOOL {
-    create_process(
-        dwcreationflags,
-        lpprocessinformation,
-        |creation_flags, proc_info| {
-            CREATE_PROCESS_W(
-                lpapplicationname,
-                lpcommandline,
-                lpprocessattributes,
-                lpthreadattributes,
-                binherithandles,
-                creation_flags,
-                lpenvironment,
-                lpcurrentdirectory,
-                lpstartupinfo,
-                proc_info,
-            )
-        },
-    )
-}
-
-#[allow(non_snake_case)]
-unsafe extern "system" fn ZludaCreateProcessAsUserA(
-    htoken: windows_sys::Win32::Foundation::HANDLE,
-    lpapplicationname: PCSTR,
-    lpcommandline: PSTR,
-    lpprocessattributes: *const SECURITY_ATTRIBUTES,
-    lpthreadattributes: *const SECURITY_ATTRIBUTES,
-    binherithandles: BOOL,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOA,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
-) -> BOOL {
-    create_process(
-        dwcreationflags,
-        lpprocessinformation,
-        |creation_flags, proc_info| {
-            CREATE_PROCESS_AS_USER_A(
-                htoken,
-                lpapplicationname,
-                lpcommandline,
-                lpprocessattributes,
-                lpthreadattributes,
-                binherithandles,
-                creation_flags,
-                lpenvironment,
-                lpcurrentdirectory,
-                lpstartupinfo,
-                proc_info,
-            )
-        },
-    )
+    let create_proc_result = CREATE_PROCESS_W(
+        lpApplicationName,
+        lpCommandLine,
+        lpProcessAttributes,
+        lpThreadAttributes,
+        bInheritHandles,
+        dwCreationFlags | CREATE_SUSPENDED,
+        lpEnvironment,
+        lpCurrentDirectory,
+        lpStartupInfo,
+        lpProcessInformation,
+    );
+    continue_create_process_hook(create_proc_result, dwCreationFlags, lpProcessInformation)
 }
 
 #[allow(non_snake_case)]
 unsafe extern "system" fn ZludaCreateProcessAsUserW(
-    htoken: windows_sys::Win32::Foundation::HANDLE,
-    lpapplicationname: PCWSTR,
-    lpcommandline: PWSTR,
-    lpprocessattributes: *const SECURITY_ATTRIBUTES,
-    lpthreadattributes: *const SECURITY_ATTRIBUTES,
-    binherithandles: BOOL,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCWSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOW,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    hToken: HANDLE,
+    lpApplicationName: LPCWSTR,
+    lpCommandLine: LPWSTR,
+    lpProcessAttributes: LPSECURITY_ATTRIBUTES,
+    lpThreadAttributes: LPSECURITY_ATTRIBUTES,
+    bInheritHandles: BOOL,
+    dwCreationFlags: DWORD,
+    lpEnvironment: LPVOID,
+    lpCurrentDirectory: LPCWSTR,
+    lpStartupInfo: LPSTARTUPINFOW,
+    lpProcessInformation: LPPROCESS_INFORMATION,
 ) -> BOOL {
-    create_process(
-        dwcreationflags,
-        lpprocessinformation,
-        |creation_flags, proc_info| {
-            CREATE_PROCESS_AS_USER_W(
-                htoken,
-                lpapplicationname,
-                lpcommandline,
-                lpprocessattributes,
-                lpthreadattributes,
-                binherithandles,
-                creation_flags,
-                lpenvironment,
-                lpcurrentdirectory,
-                lpstartupinfo,
-                proc_info,
-            )
-        },
-    )
+    let create_proc_result = CREATE_PROCESS_AS_USER_W(
+        hToken,
+        lpApplicationName,
+        lpCommandLine,
+        lpProcessAttributes,
+        lpThreadAttributes,
+        bInheritHandles,
+        dwCreationFlags | CREATE_SUSPENDED,
+        lpEnvironment,
+        lpCurrentDirectory,
+        lpStartupInfo,
+        lpProcessInformation,
+    );
+    continue_create_process_hook(create_proc_result, dwCreationFlags, lpProcessInformation)
 }
 
 #[allow(non_snake_case)]
 unsafe extern "system" fn ZludaCreateProcessWithLogonW(
-    lpusername: PCWSTR,
-    lpdomain: PCWSTR,
-    lppassword: PCWSTR,
-    dwlogonflags: windows_sys::Win32::System::Threading::CREATE_PROCESS_LOGON_FLAGS,
-    lpapplicationname: PCWSTR,
-    lpcommandline: PWSTR,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCWSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOW,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    lpUsername: LPCWSTR,
+    lpDomain: LPCWSTR,
+    lpPassword: LPCWSTR,
+    dwLogonFlags: DWORD,
+    lpApplicationName: LPCWSTR,
+    lpCommandLine: LPWSTR,
+    dwCreationFlags: DWORD,
+    lpEnvironment: LPVOID,
+    lpCurrentDirectory: LPCWSTR,
+    lpStartupInfo: LPSTARTUPINFOW,
+    lpProcessInformation: LPPROCESS_INFORMATION,
 ) -> BOOL {
-    create_process(
-        dwcreationflags,
-        lpprocessinformation,
-        |creation_flags, proc_info| {
-            CREATE_PROCESS_WITH_LOGON_W(
-                lpusername,
-                lpdomain,
-                lppassword,
-                dwlogonflags,
-                lpapplicationname,
-                lpcommandline,
-                creation_flags,
-                lpenvironment,
-                lpcurrentdirectory,
-                lpstartupinfo,
-                proc_info,
-            )
-        },
-    )
+    let create_proc_result = CREATE_PROCESS_WITH_LOGON_W(
+        lpUsername,
+        lpDomain,
+        lpPassword,
+        dwLogonFlags,
+        lpApplicationName,
+        lpCommandLine,
+        dwCreationFlags | CREATE_SUSPENDED,
+        lpEnvironment,
+        lpCurrentDirectory,
+        lpStartupInfo,
+        lpProcessInformation,
+    );
+    continue_create_process_hook(create_proc_result, dwCreationFlags, lpProcessInformation)
 }
 
 #[allow(non_snake_case)]
 unsafe extern "system" fn ZludaCreateProcessWithTokenW(
-    htoken: windows_sys::Win32::Foundation::HANDLE,
-    dwlogonflags: windows_sys::Win32::System::Threading::CREATE_PROCESS_LOGON_FLAGS,
-    lpapplicationname: PCWSTR,
-    lpcommandline: PWSTR,
-    dwcreationflags: windows_sys::Win32::System::Threading::PROCESS_CREATION_FLAGS,
-    lpenvironment: *const c_void,
-    lpcurrentdirectory: PCWSTR,
-    lpstartupinfo: *const windows_sys::Win32::System::Threading::STARTUPINFOW,
-    lpprocessinformation: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    hToken: HANDLE,
+    dwLogonFlags: DWORD,
+    lpApplicationName: LPCWSTR,
+    lpCommandLine: LPWSTR,
+    dwCreationFlags: DWORD,
+    lpEnvironment: LPVOID,
+    lpCurrentDirectory: LPCWSTR,
+    lpStartupInfo: LPSTARTUPINFOW,
+    lpProcessInformation: LPPROCESS_INFORMATION,
 ) -> BOOL {
-    create_process(
-        dwcreationflags,
-        lpprocessinformation,
-        |creation_flags, proc_info| {
-            CREATE_PROCESS_WITH_TOKEN_W(
-                htoken,
-                dwlogonflags,
-                lpapplicationname,
-                lpcommandline,
-                creation_flags,
-                lpenvironment,
-                lpcurrentdirectory,
-                lpstartupinfo,
-                proc_info,
-            )
-        },
-    )
+    let create_proc_result = CREATE_PROCESS_WITH_TOKEN_W(
+        hToken,
+        dwLogonFlags,
+        lpApplicationName,
+        lpCommandLine,
+        dwCreationFlags | CREATE_SUSPENDED,
+        lpEnvironment,
+        lpCurrentDirectory,
+        lpStartupInfo,
+        lpProcessInformation,
+    );
+    continue_create_process_hook(create_proc_result, dwCreationFlags, lpProcessInformation)
 }
 
 // This type encapsulates typical calling sequence of detours and cleanup.
@@ -752,22 +565,22 @@ unsafe extern "system" fn ZludaCreateProcessWithTokenW(
 // Additionally, within both of those we attach to CreateProcess*
 struct DetourDetachGuard {
     state: DetourUndoState,
-    suspended_threads: Vec<HANDLE>,
+    suspended_threads: Vec<*mut c_void>,
     // First element is the original fn, second is the new fn
-    overridden_non_cuda_fns: Vec<(*mut *mut c_void, *mut c_void)>,
+    overriden_non_cuda_fns: Vec<(*mut *mut c_void, *mut c_void)>,
 }
 
 impl DetourDetachGuard {
     // First element in the pair is ptr to original fn, second argument is the
     // new function. We accept *mut *mut c_void instead of *mut c_void as the
     // first element in the pair, because somehow otherwise original functions
-    // also get overridden, so for example ZludaLoadLibraryExW ends calling
+    // also get overriden, so for example ZludaLoadLibraryExW ends calling
     // itself recursively until stack overflow exception occurs
     unsafe fn new<'a>() -> Option<Self> {
         let mut result = DetourDetachGuard {
             state: DetourUndoState::DoNothing,
             suspended_threads: Vec::new(),
-            overridden_non_cuda_fns: Vec::new(),
+            overriden_non_cuda_fns: Vec::new(),
         };
         if DetourTransactionBegin() != NO_ERROR as i32 {
             return None;
@@ -777,54 +590,34 @@ impl DetourDetachGuard {
             return None;
         }
         for thread_handle in result.suspended_threads.iter().copied() {
-            if DetourUpdateThread(thread_handle.0) != NO_ERROR as i32 {
+            if DetourUpdateThread(thread_handle) != NO_ERROR as i32 {
                 return None;
             }
         }
-        result.overridden_non_cuda_fns.extend_from_slice(&[
+        result.overriden_non_cuda_fns.extend_from_slice(&[
             (
-                &raw mut LOAD_LIBRARY_A as *mut _ as *mut *mut c_void,
+                &raw mut LOAD_LIBRARY_A as *mut *mut c_void,
                 ZludaLoadLibraryA as *mut c_void,
             ),
+            (&raw mut LOAD_LIBRARY_W as _, ZludaLoadLibraryW as _),
+            (&raw mut LOAD_LIBRARY_EX_A as _, ZludaLoadLibraryExA as _),
+            (&raw mut LOAD_LIBRARY_EX_W as _, ZludaLoadLibraryExW as _),
+            (&raw mut CREATE_PROCESS_A as _, ZludaCreateProcessA as _),
+            (&raw mut CREATE_PROCESS_W as _, ZludaCreateProcessW as _),
             (
-                &raw mut LOAD_LIBRARY_W as *mut _ as _,
-                ZludaLoadLibraryW as _,
-            ),
-            (
-                &raw mut LOAD_LIBRARY_EX_A as *mut _ as _,
-                ZludaLoadLibraryExA as _,
-            ),
-            (
-                &raw mut LOAD_LIBRARY_EX_W as *mut _ as _,
-                ZludaLoadLibraryExW as _,
-            ),
-            (
-                &raw mut CREATE_PROCESS_A as *mut _ as _,
-                ZludaCreateProcessA as _,
-            ),
-            (
-                &raw mut CREATE_PROCESS_W as *mut _ as _,
-                ZludaCreateProcessW as _,
-            ),
-            (
-                &raw mut CREATE_PROCESS_AS_USER_A as *mut _ as _,
-                ZludaCreateProcessAsUserA as _,
-            ),
-            (
-                &raw mut CREATE_PROCESS_AS_USER_W as *mut _ as _,
+                &raw mut CREATE_PROCESS_AS_USER_W as _,
                 ZludaCreateProcessAsUserW as _,
             ),
             (
-                &raw mut CREATE_PROCESS_WITH_LOGON_W as *mut _ as _,
+                &raw mut CREATE_PROCESS_WITH_LOGON_W as _,
                 ZludaCreateProcessWithLogonW as _,
             ),
             (
-                &raw mut CREATE_PROCESS_WITH_TOKEN_W as *mut _ as _,
+                &raw mut CREATE_PROCESS_WITH_TOKEN_W as _,
                 ZludaCreateProcessWithTokenW as _,
             ),
-            (&raw mut LDR_LOAD_DLL as *mut _ as _, ZludaLdrLoadDll as _),
         ]);
-        for (original_fn, new_fn) in result.overridden_non_cuda_fns.iter().copied() {
+        for (original_fn, new_fn) in result.overriden_non_cuda_fns.iter().copied() {
             if DetourAttach(original_fn, new_fn) != NO_ERROR as i32 {
                 return None;
             }
@@ -845,43 +638,39 @@ impl DetourDetachGuard {
         Some(result)
     }
 
-    unsafe fn suspend_all_threads_except_current(threads: &mut Vec<HANDLE>) -> bool {
-        let thread_snapshot = unwrap_or::unwrap_ok_or!(
-            CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0),
-            _,
-            return false
-        );
+    unsafe fn suspend_all_threads_except_current(threads: &mut Vec<*mut c_void>) -> bool {
+        let thread_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if thread_snapshot == INVALID_HANDLE_VALUE {
+            return false;
+        }
         let current_thread = GetCurrentThreadId();
         let current_process = GetCurrentProcessId();
-        let mut thread = THREADENTRY32::default();
+        let mut thread = mem::zeroed::<THREADENTRY32>();
         thread.dwSize = mem::size_of::<THREADENTRY32>() as u32;
-        if Thread32First(thread_snapshot, &mut thread).is_err() {
-            CloseHandle(thread_snapshot).ok();
+        if Thread32First(thread_snapshot, &mut thread) == 0 {
+            CloseHandle(thread_snapshot);
             return false;
         }
         loop {
             if thread.th32OwnerProcessID == current_process && thread.th32ThreadID != current_thread
             {
-                let thread_handle = unwrap_or::unwrap_ok_or!(
-                    OpenThread(THREAD_SUSPEND_RESUME, false, thread.th32ThreadID),
-                    _,
-                    {
-                        CloseHandle(thread_snapshot).ok();
-                        return false;
-                    }
-                );
+                let thread_handle = OpenThread(THREAD_SUSPEND_RESUME, 0, thread.th32ThreadID);
+                if thread_handle == ptr::null_mut() {
+                    CloseHandle(thread_snapshot);
+                    return false;
+                }
                 if SuspendThread(thread_handle) == (-1i32 as u32) {
-                    CloseHandle(thread_handle).ok();
-                    CloseHandle(thread_snapshot).ok();
+                    CloseHandle(thread_handle);
+                    CloseHandle(thread_snapshot);
                     return false;
                 }
                 threads.push(thread_handle);
             }
-            if Thread32Next(thread_snapshot, &mut thread).is_err() {
+            if Thread32Next(thread_snapshot, &mut thread) == 0 {
                 break;
             }
         }
-        CloseHandle(thread_snapshot).ok();
+        CloseHandle(thread_snapshot);
         true
     }
 
@@ -892,7 +681,7 @@ impl DetourDetachGuard {
             if ResumeThread(t) == -1i32 as u32 {
                 success = false;
             }
-            if CloseHandle(t).is_err() {
+            if CloseHandle(t) == 0 {
                 success = false;
             }
         }
@@ -908,22 +697,9 @@ impl Drop for DetourDetachGuard {
                 unsafe { DetourTransactionAbort() };
                 unsafe { self.resume_threads() };
             }
-            DetourUndoState::DetachDetours => unsafe {
-                DetourTransactionBegin();
-                DetourUpdateThread(GetCurrentThread().0);
-                for (original_fn, new_fn) in self.overridden_non_cuda_fns.iter().copied() {
-                    DetourDetach(original_fn, new_fn);
-                }
-                if let Ok(mut nvrtc_detours) = nvrtc_detours().lock() {
-                    for (_, mut detoured) in nvrtc_detours.drain() {
-                        DetourDetach(
-                            std::ptr::from_mut(&mut detoured).cast(),
-                            Zluda_nvrtcCompileProgram as _,
-                        );
-                    }
-                }
-                DetourTransactionCommit();
-            },
+            DetourUndoState::DetachDetours => {
+                // TODO: implement
+            }
         }
     }
 }
@@ -937,120 +713,203 @@ enum DetourUndoState {
     DetachDetours,
 }
 
+#[allow(static_mut_refs)]
+unsafe fn continue_create_process_hook(
+    create_proc_result: BOOL,
+    original_creation_flags: DWORD,
+    process_information: LPPROCESS_INFORMATION,
+) -> BOOL {
+    if create_proc_result == 0 {
+        return 0;
+    }
+    // Detours injection can fail for various reasons, like child being 32bit.
+    // If we did not manage to inject then too bad, it's better if the child
+    // continues uninjected than to break the parent
+    if DetourUpdateProcessWithDll(
+        (*process_information).hProcess,
+        &mut ZLUDA_ML_PATH_UTF8.unwrap().as_ptr() as *mut _ as *mut _,
+        1,
+    ) != FALSE
+        && DetourUpdateProcessWithDll(
+            (*process_information).hProcess,
+            &mut ZLUDA_PATH_UTF8.unwrap().as_ptr() as *mut _ as *mut _,
+            1,
+        ) != FALSE
+        && DetourUpdateProcessWithDll(
+            (*process_information).hProcess,
+            &mut CURRENT_MODULE_FILENAME.as_ptr() as *mut _ as *mut _,
+            1,
+        ) != FALSE
+    {
+        detours_sys::DetourCopyPayloadToProcess(
+            (*process_information).hProcess,
+            &PAYLOAD_NVML_GUID,
+            ZLUDA_ML_PATH_UTF8.unwrap().as_ptr() as *mut _,
+            (ZLUDA_ML_PATH_UTF8.unwrap().len() * mem::size_of::<u8>()) as u32,
+        );
+        detours_sys::DetourCopyPayloadToProcess(
+            (*process_information).hProcess,
+            &PAYLOAD_NVCUDA_GUID,
+            ZLUDA_PATH_UTF8.unwrap().as_ptr() as *mut _,
+            (ZLUDA_PATH_UTF8.unwrap().len() * mem::size_of::<u8>()) as u32,
+        );
+    }
+    if let Some(nvapi_path) = ZLUDA_API_PATH_UTF8 {
+        if DetourUpdateProcessWithDll(
+            (*process_information).hProcess,
+            &mut nvapi_path.as_ptr() as *mut _ as *mut _,
+            1,
+        ) != FALSE
+        {
+            detours_sys::DetourCopyPayloadToProcess(
+                (*process_information).hProcess,
+                &PAYLOAD_NVAPI_GUID,
+                nvapi_path.as_ptr() as *mut _,
+                (nvapi_path.len() * mem::size_of::<u8>()) as u32,
+            );
+        }
+    }
+    if let Some(optix_path) = ZLUDA_OPTIX_PATH_UTF8 {
+        if DetourUpdateProcessWithDll(
+            (*process_information).hProcess,
+            &mut optix_path.as_ptr() as *mut _ as *mut _,
+            1,
+        ) != FALSE
+        {
+            detours_sys::DetourCopyPayloadToProcess(
+                (*process_information).hProcess,
+                &PAYLOAD_NVOPTIX_GUID,
+                optix_path.as_ptr() as *mut _,
+                (optix_path.len() * mem::size_of::<u8>()) as u32,
+            );
+        }
+    }
+    if original_creation_flags & CREATE_SUSPENDED == 0 {
+        if ResumeThread((*process_information).hThread) == -1i32 as u32 {
+            TerminateProcess((*process_information).hProcess, 1);
+            return 0;
+        }
+    }
+    create_proc_result
+}
+
 #[allow(non_snake_case)]
 #[no_mangle]
-unsafe extern "system" fn DllMain(
-    instance_handle: *mut c_void,
-    dwReason: u32,
-    _: *const u8,
-) -> i32 {
-    use windows_sys::Win32::Foundation::{FALSE, TRUE};
-    use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
-    if dwReason == DLL_PROCESS_ATTACH {
-        if DetourRestoreAfterWith() == FALSE {
-            return FALSE;
-        }
-        match DetourDetachGuard::new() {
-            Some(g) => {
-                DETOUR_DROP = Some(g);
-                DETOUR_PATHS = Some(DetourPaths::new());
-                SELF_PATH = Some(zluda_windows::get_module_path(instance_handle));
-                TRUE
+unsafe extern "system" fn DllMain(instDLL: HINSTANCE, dwReason: u32, _: *const u8) -> i32 {
+    match dwReason {
+        DLL_PROCESS_ATTACH => {
+            if DetourRestoreAfterWith() == FALSE {
+                return FALSE;
             }
-            None => FALSE,
+            if !initialize_globals(instDLL) {
+                return FALSE;
+            }
+            match DetourDetachGuard::new() {
+                Some(g) => {
+                    DETOUR_STATE = Some(g);
+                    TRUE
+                }
+                None => FALSE,
+            }
         }
-    } else if dwReason == DLL_PROCESS_DETACH {
-        DETOUR_PATHS = None;
-        match (&mut *&raw mut DETOUR_DROP).take() {
-            Some(_) => TRUE,
-            None => FALSE,
+        DLL_PROCESS_DETACH => {
+            if matches!(DETOUR_STATE, Some(_)) {
+                TRUE
+            } else {
+                FALSE
+            }
         }
-    } else {
-        TRUE
+        _ => TRUE,
     }
 }
 
-fn get_payload(guid: &detours_sys::GUID) -> Option<&'static [u8]> {
+#[allow(static_mut_refs)]
+unsafe fn initialize_globals(current_module: HINSTANCE) -> bool {
+    let mut module_name = vec![0; 128 as usize];
+    loop {
+        let size = GetModuleFileNameW(
+            current_module,
+            module_name.as_mut_ptr(),
+            module_name.len() as u32,
+        );
+        if size == 0 {
+            return false;
+        }
+        if size < module_name.len() as u32 {
+            module_name.truncate(size as usize);
+            module_name.push(0);
+            CURRENT_MODULE_FILENAME = String::from_utf16_lossy(&module_name).into_bytes();
+            break;
+        }
+        module_name.resize(module_name.len() * 2, 0);
+    }
+    let mut system_dir = vec![0; WIN_MAX_PATH];
+    let system_dir_len =
+        GetSystemDirectoryA(system_dir.as_mut_ptr() as *mut i8, system_dir.len() as u32);
+    if system_dir_len == 0 {
+        return false;
+    }
+    system_dir.truncate(system_dir_len as usize);
+    let mut driver_store = PathBuf::from(std::str::from_utf8_unchecked(&*system_dir));
+    driver_store.push("DriverStore");
+    driver_store.push("FileRepository");
+    let driver_store_string = driver_store.to_str().unwrap().to_ascii_uppercase();
+    DRIVERSTORE_UTF16 = driver_store_string.encode_utf16().collect::<Vec<_>>();
+    DRIVERSTORE_UTF8 = driver_store_string.into_bytes();
+    if !load_global_string(
+        &PAYLOAD_NVCUDA_GUID,
+        (&raw mut ZLUDA_PATH_UTF8).as_mut().unwrap_unchecked(),
+        || (&raw mut ZLUDA_PATH_UTF16).as_mut().unwrap_unchecked(),
+    ) {
+        return false;
+    }
+    if !load_global_string(
+        &PAYLOAD_NVML_GUID,
+        (&raw mut ZLUDA_ML_PATH_UTF8).as_mut().unwrap_unchecked(),
+        || (&raw mut ZLUDA_ML_PATH_UTF16).as_mut().unwrap_unchecked(),
+    ) {
+        return false;
+    }
+    load_global_string(
+        &PAYLOAD_NVAPI_GUID,
+        (&raw mut ZLUDA_API_PATH_UTF8).as_mut().unwrap_unchecked(),
+        || ZLUDA_API_PATH_UTF16.get_or_insert(Vec::new()),
+    );
+    load_global_string(
+        &PAYLOAD_NVOPTIX_GUID,
+        (&raw mut ZLUDA_OPTIX_PATH_UTF8).as_mut().unwrap_unchecked(),
+        || ZLUDA_OPTIX_PATH_UTF16.get_or_insert(Vec::new()),
+    );
+    true
+}
+
+fn load_global_string(
+    guid: &detours_sys::GUID,
+    utf8_path: &mut Option<&'static [u8]>,
+    utf16_path: impl FnOnce() -> &'static mut Vec<u16>,
+) -> bool {
+    if let Some(payload) = get_payload(guid) {
+        *utf8_path = Some(payload);
+        *utf16_path() = unsafe { std::str::from_utf8_unchecked(payload) }
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        true
+    } else {
+        false
+    }
+}
+
+fn get_payload<T: Copy>(guid: &detours_sys::GUID) -> Option<&'static [T]> {
     let mut size = 0;
     let payload_ptr = unsafe { detours_sys::DetourFindPayloadEx(guid, &mut size) };
     if payload_ptr != ptr::null_mut() {
-        Some(unsafe { slice::from_raw_parts(payload_ptr as *const _, size as usize) })
+        Some(unsafe {
+            slice::from_raw_parts(
+                payload_ptr as *const _,
+                (size as usize) / mem::size_of::<T>(),
+            )
+        })
     } else {
         None
-    }
-}
-
-mod nvrtc {
-    use std::ffi::CStr;
-
-    use winnow::ascii::alphanumeric1;
-    use winnow::ascii::multispace0;
-    use winnow::combinator::alt;
-    use winnow::prelude::*;
-    use winnow::PResult;
-
-    fn continuation(input: &mut &str) -> PResult<()> {
-        (
-            multispace0,
-            '=',
-            multispace0,
-            alphanumeric1,
-            '_',
-            alphanumeric1,
-        )
-            .void()
-            .parse_next(input)
-    }
-
-    pub(crate) fn is_arch_option(s: &CStr) -> bool {
-        let mut text = match s.to_str() {
-            Ok(text) => text,
-            Err(_) => return false,
-        };
-        (alt(("--gpu-architecture", "-arch")), continuation)
-            .parse_next(&mut text)
-            .is_ok()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_nvrtc;
-    use widestring::{u16cstr, U16CStr};
-    use windows::{core::PWSTR, Win32::Foundation::UNICODE_STRING};
-
-    fn assert_is_nvrtc(text: &U16CStr) {
-        assert!(unsafe {
-            is_nvrtc(&UNICODE_STRING {
-                Buffer: PWSTR(text.as_ptr().cast_mut()),
-                Length: (text.len() * 2) as u16,
-                MaximumLength: 0,
-            })
-            .unwrap()
-        });
-    }
-
-    #[test]
-    fn is_nvrtc1() {
-        assert_is_nvrtc(u16cstr!("nvrtc64_112_0.dll"));
-    }
-
-    #[test]
-    fn is_nvrtc2() {
-        assert_is_nvrtc(u16cstr!("nvrtc64_130.dll"));
-    }
-
-    #[test]
-    fn is_nvrtc3() {
-        assert_is_nvrtc(u16cstr!(
-            r#"C:\Users\vosen\.conda\envs\pytorch\lib\site-packages\torch\lib\nvrtc64_112_0.dll"#
-        ));
-    }
-
-    #[test]
-    fn is_nvrtc4() {
-        assert_is_nvrtc(u16cstr!(
-            r#"C:\Users\vosen\.conda\envs\pytorch\lib\site-packages\torch\lib\nvrtc64_120.DLL"#
-        ));
     }
 }

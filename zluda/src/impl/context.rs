@@ -1,391 +1,304 @@
-use super::module;
-use cuda_types::cuda::*;
+// HIP does not implement context APIs:
+// https://rocmdocs.amd.com/en/latest/Programming_Guides/HIP_API_Guide.html#hip-context-management-apis
+
+use super::{fold_cuda_errors, module, stream, LiveCheck, ZludaObject};
+use crate::hip_call_cuda;
+use cuda_types::*;
 use hip_runtime_sys::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::{cell::RefCell, ffi::c_void, ptr, sync::Mutex};
-use zluda_common::{FromCuda, ZludaObject};
+use std::ptr;
+use std::sync::atomic::AtomicU32;
+use std::sync::Mutex;
+use std::{cell::RefCell, ffi::c_void};
 
+// We store device separately to avoid accessing context fields when popping
+// a context from the stack. It's perfectly ok to destroy a context and remove
+// it from the stack later
 thread_local! {
-    pub(crate) static STACK: RefCell<Vec<(CUcontext, hipDevice_t)>> = RefCell::new(Vec::new());
+    pub(crate) static CONTEXT_STACK: RefCell<Vec<(*mut Context, hipDevice_t)>> = RefCell::new(Vec::new());
 }
 
-pub(crate) struct Context {
+pub(crate) type Context = LiveCheck<ContextData>;
+
+impl ZludaObject for ContextData {
+    #[cfg(target_pointer_width = "64")]
+    const LIVENESS_COOKIE: usize = 0x5f0119560b643ffb;
+    #[cfg(target_pointer_width = "32")]
+    const LIVENESS_COOKIE: usize = 0x0b643ffb;
+    const LIVENESS_FAIL: CUresult = CUresult::CUDA_ERROR_INVALID_CONTEXT;
+
+    fn drop_with_result(&mut self, _: bool) -> Result<(), CUresult> {
+        self.with_inner_mut(|mutable| {
+            fold_cuda_errors(
+                mutable
+                    .streams
+                    .iter()
+                    .copied()
+                    .map(|s| unsafe { LiveCheck::drop_box_with_result(s, true) }),
+            )
+        })?
+    }
+}
+
+pub(crate) struct ContextData {
     pub(crate) device: hipDevice_t,
-    pub(crate) alloc_stream: hipStream_t,
-    pub(crate) state: Mutex<ContextState>,
+    pub(crate) variant: ContextVariant,
 }
 
-pub(crate) struct ContextState {
+pub(crate) enum ContextVariant {
+    NonPrimary(NonPrimaryContextData),
+    Primary(Mutex<PrimaryContextData>),
+}
+
+pub(crate) struct PrimaryContextData {
     pub(crate) ref_count: u32,
     pub(crate) flags: u32,
-    pub(crate) modules: FxHashSet<CUmodule>,
-    pub(crate) storage: FxHashMap<usize, StorageData>,
+    pub(crate) mutable: ContextInnerMutable,
 }
 
-pub(crate) struct StorageData {
-    pub(crate) value: usize,
-    pub(crate) reset_cb: Option<extern "system" fn(CUcontext, *mut c_void, *mut c_void)>,
-    pub(crate) handle: CUcontext,
+pub(crate) struct NonPrimaryContextData {
+    flags: AtomicU32,
+    mutable: Mutex<ContextInnerMutable>,
 }
 
-impl ContextState {
-    pub(crate) fn new() -> Self {
-        ContextState {
-            ref_count: 0,
-            flags: 0,
-            modules: FxHashSet::default(),
-            storage: FxHashMap::default(),
-        }
-    }
-
-    pub(crate) fn reset(&mut self) -> CUresult {
-        for (key, data) in self.storage.iter_mut() {
-            if let Some(_cb) = data.reset_cb {
-                // TODO: check that these callbacks do not call into the CUDA driver
-                // since this could result in a recursive mutex lock.
-                _cb(data.handle, *key as *mut c_void, data.value as *mut c_void);
-            }
-        }
-        self.ref_count = 0;
-        self.flags = 0;
-        // drop all modules and return first error if any
-        let result = self.modules.drain().fold(Ok(()), |res: CUresult, hmod| {
-            match (res, zluda_common::drop_checked::<module::Module>(hmod)) {
-                (Err(e), _) => Err(e),
-                (_, Err(e)) => Err(e),
-                _ => Ok(()),
-            }
-        });
-        self.storage.clear();
-        result
-    }
-}
-
-impl Context {
-    pub(crate) fn new(device: hipDevice_t) -> Result<Self, CUerror> {
-        let mut alloc_stream = unsafe { std::mem::zeroed() };
-        unsafe { hipStreamCreateWithFlags(&mut alloc_stream, hipStreamNonBlocking) }?;
-        Ok(Self {
+impl ContextData {
+    pub(crate) fn new_non_primary(flags: u32, device: hipDevice_t) -> Self {
+        Self {
             device,
-            alloc_stream,
-            state: Mutex::new(ContextState::new()),
-        })
-    }
-
-    pub(crate) fn with_state(&self, fn_: impl FnOnce(&ContextState) -> CUresult) -> CUresult {
-        match self.state.lock() {
-            Ok(guard) => fn_(&*guard),
-            Err(_) => CUresult::ERROR_UNKNOWN,
+            variant: ContextVariant::NonPrimary(NonPrimaryContextData {
+                flags: AtomicU32::new(flags),
+                mutable: Mutex::new(ContextInnerMutable::new()),
+            }),
         }
     }
 
-    pub(crate) fn with_state_mut(
+    pub(crate) fn new_primary(device: hipDevice_t) -> Self {
+        Self {
+            device,
+            variant: ContextVariant::Primary(Mutex::new(PrimaryContextData {
+                ref_count: 0,
+                flags: 0,
+                mutable: ContextInnerMutable::new(),
+            })),
+        }
+    }
+
+    pub(crate) fn with_inner_mut<T>(
         &self,
-        fn_: impl FnOnce(&mut ContextState) -> CUresult,
-    ) -> CUresult {
-        match self.state.lock() {
-            Ok(mut guard) => fn_(&mut *guard),
-            Err(_) => CUresult::ERROR_UNKNOWN,
-        }
-    }
-}
-
-impl ZludaObject for Context {
-    const COOKIE: usize = 0x5f867c6d9cb73315;
-
-    type Error = CUerror;
-    type CudaHandle = CUcontext;
-
-    fn drop_checked(&mut self) -> CUresult {
-        Ok(())
-    }
-}
-
-// This type is used in lieu of Option<&Context> because of trait coherence rules.
-// We can't implement FromCuda for Option<&T> in this crate because Option<T> is defined in the standard library.
-pub(crate) enum MaybeContextRef<'a> {
-    None,
-    Some(&'a Context),
-}
-
-impl<'a>
-    zluda_common::FromCuda<
-        'a,
-        <Context as ZludaObject>::CudaHandle,
-        <Context as ZludaObject>::Error,
-    > for MaybeContextRef<'a>
-{
-    fn from_cuda(
-        handle: &'a <Context as ZludaObject>::CudaHandle,
-    ) -> Result<MaybeContextRef<'a>, <Context as ZludaObject>::Error> {
-        match zluda_common::as_ref(handle) {
-            Some(ctx) => Ok(MaybeContextRef::Some(ctx.as_result()?)),
-            None => Ok(MaybeContextRef::None),
-        }
-    }
-}
-
-pub(crate) fn get_current_device() -> Result<hipDevice_t, CUerror> {
-    STACK.with(|stack| {
-        stack
-            .try_borrow()
-            .map_err(|_| CUerror::UNKNOWN)
-            .and_then(|s| {
-                s.last()
-                    .ok_or(CUerror::INVALID_CONTEXT)
-                    .map(|(_, dev)| *dev)
-            })
-    })
-}
-
-pub(crate) fn get_current_context() -> Result<CUcontext, CUerror> {
-    if let Some(ctx) = STACK.with(|stack| stack.borrow().last().copied().map(|(ctx, _)| ctx)) {
-        return Ok(ctx);
-    }
-    Err(CUerror::INVALID_CONTEXT)
-}
-
-pub(crate) unsafe fn get_limit(pvalue: *mut usize, limit: hipLimit_t) -> hipError_t {
-    unsafe { hipDeviceGetLimit(pvalue, limit) }
-}
-
-pub(crate) fn set_limit(limit: hipLimit_t, value: usize) -> hipError_t {
-    unsafe { hipDeviceSetLimit(limit, value) }
-}
-
-pub(crate) fn set_cache_config(config: CUfunc_cache) -> CUresult {
-    get_current_context()?;
-    match config {
-        CUfunc_cache::CU_FUNC_CACHE_PREFER_NONE
-        | CUfunc_cache::CU_FUNC_CACHE_PREFER_SHARED
-        | CUfunc_cache::CU_FUNC_CACHE_PREFER_L1
-        | CUfunc_cache::CU_FUNC_CACHE_PREFER_EQUAL => Ok(()),
-        _ => Err(CUerror::INVALID_VALUE),
-    }
-}
-
-pub(crate) fn synchronize() -> hipError_t {
-    unsafe { hipDeviceSynchronize() }
-}
-
-pub(crate) fn synchronize_v2(ctx: &Context) -> hipError_t {
-    let mut current_device = 0;
-    unsafe { hipGetDevice(&mut current_device)? };
-    let _dev_drop = if current_device != ctx.device {
-        unsafe { hipSetDevice(ctx.device) }?;
-        Some(SetDeviceOnDrop(current_device))
-    } else {
-        None
-    };
-    unsafe { hipDeviceSynchronize() }
-}
-
-struct SetDeviceOnDrop(i32);
-
-impl Drop for SetDeviceOnDrop {
-    fn drop(&mut self) {
-        unsafe { hipSetDevice(self.0) }.ok();
-    }
-}
-
-pub(crate) fn set_current(raw_ctx: CUcontext) -> CUresult {
-    let new_device = if raw_ctx.0 == ptr::null_mut() {
-        STACK.with(|stack| {
-            let mut stack = stack.borrow_mut();
-            if let Some((_, old_device)) = stack.pop() {
-                if let Some((_, new_device)) = stack.last() {
-                    if old_device != *new_device {
-                        return Some(*new_device);
-                    }
-                }
+        fn_: impl FnOnce(&mut ContextInnerMutable) -> T,
+    ) -> Result<T, CUresult> {
+        Ok(match self.variant {
+            ContextVariant::Primary(ref mutex_over_primary_ctx_data) => {
+                let mut primary_ctx_data = mutex_over_primary_ctx_data
+                    .lock()
+                    .map_err(|_| CUresult::CUDA_ERROR_UNKNOWN)?;
+                fn_(&mut primary_ctx_data.mutable)
             }
-            None
-        })
-    } else {
-        let ctx: &Context = FromCuda::<_, CUerror>::from_cuda(&raw_ctx)?;
-        let device = ctx.device;
-        STACK.with(move |stack| {
-            let mut stack = stack.borrow_mut();
-            let last_device = stack.last().map(|(_, dev)| *dev);
-            stack.push((raw_ctx, device));
-            match last_device {
-                None => Some(device),
-                Some(last_device) if last_device != device => Some(device),
-                _ => None,
+            ContextVariant::NonPrimary(NonPrimaryContextData { ref mutable, .. }) => {
+                let mut ctx_data_mutable =
+                    mutable.lock().map_err(|_| CUresult::CUDA_ERROR_UNKNOWN)?;
+                fn_(&mut ctx_data_mutable)
             }
         })
-    };
-    if let Some(dev) = new_device {
-        unsafe { hipSetDevice(dev)? };
     }
-    Ok(())
 }
 
-pub(crate) fn get_current(pctx: &mut CUcontext) -> CUresult {
-    match get_current_context() {
-        Ok(ctx) => *pctx = ctx,
-        Err(_) => *pctx = CUcontext(ptr::null_mut()),
-    }
-    CUresult::SUCCESS
+pub(crate) struct ContextInnerMutable {
+    pub(crate) streams: FxHashSet<*mut stream::Stream>,
+    pub(crate) modules: FxHashSet<*mut module::Module>,
+    // Field below is here to support CUDA Driver Dark API
+    pub(crate) local_storage: FxHashMap<*mut c_void, LocalStorageValue>,
 }
 
-pub(crate) fn get_device(dev: &mut hipDevice_t) -> CUresult {
-    get_device_v2(dev, MaybeContextRef::None)
-}
-
-pub(crate) fn get_device_v2(dev: &mut hipDevice_t, ctx: MaybeContextRef) -> CUresult {
-    let device = match ctx {
-        MaybeContextRef::Some(ctx) => ctx.device,
-        MaybeContextRef::None => {
-            let cu_ctx: CUcontext = get_current_context()?;
-            let ctx: &Context = FromCuda::<_, CUerror>::from_cuda(&cu_ctx)?;
-            ctx.device
+impl ContextInnerMutable {
+    pub(crate) fn new() -> Self {
+        ContextInnerMutable {
+            streams: FxHashSet::default(),
+            modules: FxHashSet::default(),
+            local_storage: FxHashMap::default(),
         }
-    };
-    *dev = device;
-    Ok(())
-}
-
-pub(crate) unsafe fn push_current(ctx: CUcontext) -> CUresult {
-    if ctx == CUcontext(ptr::null_mut()) {
-        return CUresult::ERROR_INVALID_VALUE;
     }
-    set_current(ctx)
+    pub(crate) fn drop_with_result(&mut self) -> Result<(), CUresult> {
+        fold_cuda_errors(
+            self.streams
+                .iter()
+                .copied()
+                .map(|s| unsafe { LiveCheck::drop_box_with_result(s, true) }),
+        )
+    }
 }
 
-pub(crate) unsafe fn push_current_v2(ctx: CUcontext) -> CUresult {
-    push_current(ctx)
+pub(crate) struct LocalStorageValue {
+    pub(crate) value: *mut c_void,
+    pub(crate) _dtor_callback: Option<extern "system" fn(CUcontext, *mut c_void, *mut c_void)>,
 }
 
-pub(crate) unsafe fn pop_current(result: Option<&mut CUcontext>) -> CUresult {
-    let old_ctx_and_new_device = STACK.with(|stack| {
+pub(crate) unsafe fn create(
+    pctx: *mut *mut Context,
+    flags: u32,
+    dev: hipDevice_t,
+) -> Result<(), CUresult> {
+    if pctx == ptr::null_mut() {
+        return Err(CUresult::CUDA_ERROR_INVALID_VALUE);
+    }
+    let context_box = Box::new(LiveCheck::new(ContextData::new_non_primary(flags, dev)));
+    let context_ptr = Box::into_raw(context_box);
+    *pctx = context_ptr;
+    push_context_stack(context_ptr)
+}
+
+pub(crate) unsafe fn destroy(ctx: *mut Context) -> Result<(), CUresult> {
+    if ctx == ptr::null_mut() {
+        return Err(CUresult::CUDA_ERROR_INVALID_VALUE);
+    }
+    let ctx_ref = LiveCheck::as_result(ctx)?;
+    if let ContextVariant::Primary { .. } = ctx_ref.variant {
+        return Err(CUresult::CUDA_ERROR_INVALID_CONTEXT);
+    }
+    CONTEXT_STACK.with(|stack| {
         let mut stack = stack.borrow_mut();
-        stack
-            .pop()
-            .map(|(ctx, _)| (ctx, stack.last().map(|(_, dev)| *dev)))
-    });
-    let ctx = match old_ctx_and_new_device {
-        Some((old_ctx, new_device)) => {
-            if let Some(new_device) = new_device {
-                hipSetDevice(new_device)?;
-            }
-            old_ctx
+        let should_pop = match stack.last() {
+            Some((active_ctx, _)) => *active_ctx == ctx,
+            None => false,
+        };
+        if should_pop {
+            pop_context_stack_impl(&mut stack)?;
         }
-        None => return CUresult::ERROR_INVALID_CONTEXT,
+        Ok(())
+    })?;
+    LiveCheck::drop_box_with_result(ctx, false)
+}
+
+pub(crate) unsafe fn push_current(pctx: *mut Context) -> Result<(), CUresult> {
+    if pctx == ptr::null_mut() {
+        return Err(CUresult::CUDA_ERROR_INVALID_VALUE);
+    }
+    push_context_stack(pctx)
+}
+
+pub(crate) unsafe fn pop_current(pctx: *mut *mut Context) -> Result<(), CUresult> {
+    let mut ctx = pop_context_stack()?;
+    let ctx_ptr = match &mut ctx {
+        Some(ctx) => *ctx as *mut _,
+        None => return Err(CUresult::CUDA_ERROR_INVALID_CONTEXT),
     };
-    if let Some(out) = result {
-        *out = ctx;
+    if pctx != ptr::null_mut() {
+        *pctx = ctx_ptr;
     }
     Ok(())
 }
 
-pub(crate) unsafe fn create_v2(
-    ctx: &mut CUcontext,
-    _flags: ::core::ffi::c_uint,
-    dev: cuda_types::cuda::CUdevice,
-) -> CUresult {
-    let handle = Context::wrap(Context::new(dev)?);
-    // TODO: optimize
-    set_current(handle)?;
-    *ctx = handle;
+pub(crate) unsafe fn set_current(ctx: *mut Context) -> Result<(), CUresult> {
+    if ctx == ptr::null_mut() {
+        pop_context_stack()?;
+    } else {
+        push_context_stack(ctx)?;
+    }
     Ok(())
 }
 
-pub(crate) unsafe fn create_v4(
-    ctx: &mut CUcontext,
-    _ctx_create_params: Option<&mut cuda_types::cuda::CUctxCreateParams>,
-    flags: ::core::ffi::c_uint,
-    dev: cuda_types::cuda::CUdevice,
-) -> CUresult {
-    create_v2(ctx, flags, dev)
+pub(crate) fn get_current(pctx: *mut *mut Context) -> CUresult {
+    if pctx == ptr::null_mut() {
+        return CUresult::CUDA_ERROR_INVALID_VALUE;
+    }
+    let ctx = get_current_from_stack().unwrap_or(ptr::null_mut());
+    unsafe { *pctx = ctx };
+    CUresult::CUDA_SUCCESS
 }
 
-pub(crate) unsafe fn destroy_v2(ctx: CUcontext) -> CUresult {
-    zluda_common::drop_checked::<Context>(ctx)
+pub fn get_device(dev: *mut hipDevice_t) -> Result<(), CUresult> {
+    let dev_idx = with_current(|ctx| ctx.device)?;
+    unsafe { *dev = dev_idx };
+    Ok(())
 }
 
-pub(crate) unsafe fn pop_current_v2(ctx: Option<&mut CUcontext>) -> CUresult {
-    pop_current(ctx)
+pub(crate) fn get_limit(pvalue: *mut usize, limit: hipLimit_t) -> Result<(), CUresult> {
+    hip_call_cuda! { hipDeviceGetLimit(pvalue, limit) };
+    Ok(())
 }
 
-pub(crate) unsafe fn get_stream_priority_range(
-    least_priority: *mut ::core::ffi::c_int,
-    greatest_priority: *mut ::core::ffi::c_int,
-) -> hipError_t {
-    hipDeviceGetStreamPriorityRange(least_priority, greatest_priority)
+pub(crate) fn set_limit(limit: hipLimit_t, value: usize) -> Result<(), CUresult> {
+    hip_call_cuda! { hipDeviceSetLimit(limit, value) };
+    Ok(())
 }
 
-pub(crate) unsafe fn set_flags(flags: ::core::ffi::c_uint) -> CUresult {
-    let cu_ctx = get_current_context()?;
-    let ctx: &Context = FromCuda::<_, CUerror>::from_cuda(&cu_ctx)?;
-    ctx.with_state_mut(|state| {
-        state.flags = flags;
-        Ok(())
-    })
+pub(crate) fn set_flags(flags: u32) -> Result<(), CUresult> {
+    with_current(|ctx| match ctx.variant {
+        ContextVariant::NonPrimary(ref context) => {
+            context
+                .flags
+                .store(flags, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        // This looks stupid, but this is an actual CUDA behavior,
+        // see primary_context.rs test
+        ContextVariant::Primary(_) => Ok(()),
+    })?
 }
 
-pub(crate) unsafe fn get_api_version(
-    _ctx: CUcontext,
-    version: &mut ::core::ffi::c_uint,
-) -> CUresult {
-    // That's what original CUDA driver does
+pub(crate) unsafe fn get_api_version(ctx: *mut Context, version: *mut u32) -> Result<(), CUresult> {
+    if ctx == ptr::null_mut() {
+        return Err(CUresult::CUDA_ERROR_INVALID_CONTEXT);
+    }
+    //let ctx = LiveCheck::as_result(ctx)?;
+    //TODO: query device for properties roughly matching CUDA API version
     *version = 3020;
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tests::CudaApi;
-    use cuda_macros::test_cuda;
-    use std::mem;
+pub(crate) unsafe fn synchronize() -> Result<(), CUresult> {
+    // TODO
+    // We currently do this to sync with default stream which syncs whole device anyway,
+    // figure out if we can do something smarter here
+    hip_call_cuda!(hipDeviceSynchronize());
+    Ok(())
+}
 
-    #[test_cuda]
-    fn empty_pop_fails(api: impl CudaApi) {
-        api.cuInit(0);
-        assert_eq!(
-            api.cuCtxPopCurrent_v2_unchecked(&mut unsafe { mem::zeroed() }),
-            CUresult::ERROR_INVALID_CONTEXT
-        );
-    }
+pub(crate) fn with_current<T>(f: impl FnOnce(&ContextData) -> T) -> Result<T, CUresult> {
+    CONTEXT_STACK.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .ok_or(CUresult::CUDA_ERROR_INVALID_CONTEXT)
+            .and_then(|(ctx, _)| Ok(f(unsafe { LiveCheck::as_result(*ctx)? })))
+    })
+}
 
-    #[test_cuda]
-    fn pop_into_null_succeeds(api: impl CudaApi) {
-        api.cuInit(0);
-        api.cuCtxCreate_v2(&mut unsafe { mem::zeroed() }, 0, 0);
-        api.cuCtxPopCurrent_v2(ptr::null_mut());
-    }
+fn get_current_from_stack() -> Option<*mut Context> {
+    CONTEXT_STACK.with(|stack| stack.borrow().last().copied().map(|(ctx, _)| ctx))
+}
 
-    #[test_cuda]
-    fn set_cache_config_accepts_known_values(api: impl CudaApi) {
-        api.cuInit(0);
-        api.cuCtxCreate_v2(&mut unsafe { mem::zeroed() }, 0, 0);
-        for config in [
-            CUfunc_cache::CU_FUNC_CACHE_PREFER_NONE,
-            CUfunc_cache::CU_FUNC_CACHE_PREFER_SHARED,
-            CUfunc_cache::CU_FUNC_CACHE_PREFER_L1,
-            CUfunc_cache::CU_FUNC_CACHE_PREFER_EQUAL,
-        ] {
-            api.cuCtxSetCacheConfig(config);
-        }
-    }
+fn pop_context_stack() -> Result<Option<*mut Context>, CUresult> {
+    CONTEXT_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        pop_context_stack_impl(&mut stack)
+    })
+}
 
-    #[test_cuda]
-    fn set_cache_config_rejects_unknown_value(api: impl CudaApi) {
-        api.cuInit(0);
-        api.cuCtxCreate_v2(&mut unsafe { mem::zeroed() }, 0, 0);
-        assert_eq!(
-            api.cuCtxSetCacheConfig_unchecked(CUfunc_cache(4)),
-            CUresult::ERROR_INVALID_VALUE
-        );
+fn pop_context_stack_impl(
+    stack: &mut Vec<(*mut Context, hipDevice_t)>,
+) -> Result<Option<*mut Context>, CUresult> {
+    let ctx = stack.pop();
+    if let Some((_, device)) = stack.last() {
+        hip_call_cuda!(hipSetDevice(*device));
     }
+    Ok(ctx.map(|(ctx, _)| ctx))
+}
 
-    #[test_cuda]
-    fn set_cache_config_requires_current_context(api: impl CudaApi) {
-        api.cuInit(0);
-        assert_eq!(
-            api.cuCtxSetCacheConfig_unchecked(CUfunc_cache::CU_FUNC_CACHE_PREFER_NONE),
-            CUresult::ERROR_INVALID_CONTEXT
-        );
-    }
+unsafe fn push_context_stack(ctx: *mut Context) -> Result<(), CUresult> {
+    let device = { LiveCheck::as_result(ctx)?.device };
+    CONTEXT_STACK.with(|stack| stack.borrow_mut().push((ctx, device)));
+    hip_call_cuda!(hipSetDevice(device));
+    Ok(())
+}
+
+pub(crate) unsafe fn get_stream_priority_range(
+    least_priority: *mut ::std::os::raw::c_int,
+    greatest_priority: *mut ::std::os::raw::c_int,
+) -> Result<(), CUresult> {
+    hip_call_cuda!(hipDeviceGetStreamPriorityRange(
+        least_priority,
+        greatest_priority
+    ));
+    Ok(())
 }

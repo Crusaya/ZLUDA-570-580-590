@@ -1,20 +1,25 @@
 [package]
 name = "zluda_dnn"
 version = "0.0.0"
+authors = ["Andrzej Janik <vosen@vosen.pl>"]
 edition = "2021"
 
 [lib]
+name = "cudnn"
+crate-type = ["cdylib"]
+
+[features]
+rocm5 = ["hip_runtime-sys/rocm5"]
 
 [dependencies]
-cuda_macros = { path = "../cuda_macros" }
 cuda_types = { path = "../cuda_types" }
-zluda_common = { path = "../zluda_common" }
-miopen-sys = { path = "../ext/miopen-sys" }
-hip_runtime-sys = { path = "../ext/hip_runtime-sys" }
-rustc-hash = "2.0.0"
-arrayvec = "0.7.6"
-static_assertions = "1.1.0"
+hip_common = { path = "../hip_common" }
+miopen-sys = { path = "../miopen-sys" }
+hip_runtime-sys = { path = "../hip_runtime-sys" }
+zluda_dark_api = { path = "../zluda_dark_api" }
+lazy_static = "1.4.0"
 
-[target.'cfg(windows)'.dependencies]
-zluda_windows = { path = "../zluda_windows" }
-libloading = "0.8"
+[package.metadata.zluda]
+windows_nightly = true
+linux_names = ["libcudnn.so.9"]
+dump_names = ["libcudnn.so"]

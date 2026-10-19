@@ -1,27 +1,23 @@
 [package]
 name = "zluda_sparse"
 version = "0.0.0"
-edition = "2021"
+authors = ["Andrzej Janik <vosen@vosen.pl>"]
+edition = "2018"
 
 [lib]
-crate-type = ["cdylib"]
 name = "cusparse"
+crate-type = ["cdylib"]
+
+[features]
+rocm5 = ["hip_common/rocm5", "hip_runtime-sys/rocm5", "zluda_dark_api/rocm5"]
 
 [dependencies]
-cuda_macros = { path = "../cuda_macros" }
+rocsparse-sys = { path = "../rocsparse-sys" }
+hip_common = { path = "../hip_common" }
+hip_runtime-sys = { path = "../hip_runtime-sys" }
+zluda_dark_api = { path = "../zluda_dark_api" }
 cuda_types = { path = "../cuda_types" }
-rocsparse-sys = { path = "../ext/rocsparse-sys" }
-zluda_common = { path = "../zluda_common" }
-unwrap_or = "1.0.1"
 
 [package.metadata.zluda]
-linux_symlinks = ["libcusparse.so.10", "libcusparse.so.11", "libcusparse.so.12"]
-windows_paths = ["cusparse64_10.dll", "cusparse64_11.dll", "cusparse64_12.dll"]
-
-[target.'cfg(windows)'.dependencies]
-zluda_windows = { path = "../zluda_windows" }
-libloading = "0.8"
-
-[target.'cfg(windows)'.build-dependencies]
-embed-resource = "3.0"
-
+linux_names = ["libcusparse.so.11"]
+dump_names = ["libcusparse.so"]

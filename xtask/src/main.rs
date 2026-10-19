@@ -1,593 +1,509 @@
-use bpaf::{Args, Bpaf, Parser};
-use cargo_metadata::{MetadataCommand, Package};
+use argh::{EarlyExit, FromArgs, TopLevelCommand};
+use cargo_metadata::camino::Utf8PathBuf;
 use serde::Deserialize;
-use std::{collections::HashMap, env, ffi::OsString, path::PathBuf, process::Command};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-#[derive(Debug, Clone, Bpaf)]
-#[bpaf(options)]
-enum Options {
-    #[bpaf(command)]
-    /// Compile ZLUDA (default command)
-    Build(#[bpaf(external(build))] Build),
-    #[bpaf(command)]
-    /// Compile ZLUDA and build a package
-    Zip(#[bpaf(external(build))] Build),
+type DynError = Box<dyn std::error::Error>;
+
+struct Arguments {
+    command: Subcommand,
 }
 
-#[derive(Debug, Clone, Bpaf)]
-struct Build {
-    #[bpaf(any("CARGO", not_help), many)]
-    /// Arguments to pass to cargo, e.g. `--release` for release build
-    cargo_arguments: Vec<OsString>,
-}
-
-fn not_help(s: OsString) -> Option<OsString> {
-    if s == "-h" || s == "--help" {
-        None
-    } else {
-        Some(s)
+impl TopLevelCommand for Arguments {}
+impl FromArgs for Arguments {
+    fn from_args(command_name: &[&str], args: &[&str]) -> Result<Self, argh::EarlyExit> {
+        #[derive(FromArgs)]
+        /// Run various ZLUDA tasks
+        struct TryArguments {
+            #[argh(subcommand)]
+            command: Option<Subcommand>,
+        }
+        Ok(
+            match <TryArguments as FromArgs>::from_args(command_name, args) {
+                Ok(TryArguments { command }) => Arguments {
+                    command: command.unwrap_or_default(),
+                },
+                Err(err @ EarlyExit { status: Ok(()), .. }) => return Err(err),
+                Err(EarlyExit {
+                    status: Err(()), ..
+                }) => Arguments {
+                    command: Subcommand::Build(BuildCommand::from_args(command_name, args)?),
+                },
+            },
+        )
     }
 }
 
-// We need to sniff out some args passed to cargo to understand how to create
-// symlinks (should they go into `target/debug`, `target/release` or custom)
-#[derive(Debug, Clone, Bpaf)]
-struct Cargo {
-    #[bpaf(switch, long, short)]
-    release: Option<bool>,
-    #[bpaf(long)]
-    profile: Option<String>,
-    #[bpaf(long)]
-    target: Option<String>,
-    #[bpaf(any("", Some), many)]
-    _unused: Vec<OsString>,
+#[derive(FromArgs)]
+#[argh(subcommand)]
+enum Subcommand {
+    Build(BuildCommand),
+    Zip(ZipCommand),
 }
 
+impl Default for Subcommand {
+    fn default() -> Self {
+        Subcommand::Build(BuildCommand {
+            release: false,
+            rocm5: false,
+            nightly: false,
+        })
+    }
+}
+
+#[derive(FromArgs)]
+/// Compile ZLUDA for the current platform (default command)
+#[argh(subcommand, name = "build")]
+struct BuildCommand {
+    /// build artifacts in release mode, with optimizations
+    #[argh(switch, short = 'r')]
+    release: bool,
+
+    /// build for ROCm 5 (Windows only)
+    #[argh(switch)]
+    rocm5: bool,
+
+    /// enable unstable features
+    #[argh(switch)]
+    nightly: bool,
+}
+
+#[derive(FromArgs)]
+/// Compile ZLUDA and package binaries into an archive (.zip or .tar.gz)
+#[argh(subcommand, name = "zip")]
+struct ZipCommand {
+    /// use artifacts from release mode
+    #[argh(switch, short = 'r')]
+    #[allow(dead_code)]
+    release: bool,
+
+    /// use artifacts for ROCm 5 (Windows only)
+    #[argh(switch)]
+    rocm5: bool,
+}
+
+fn main() -> Result<(), DynError> {
+    let args: Arguments = argh::from_env();
+    std::process::exit(match args.command {
+        Subcommand::Build(BuildCommand {
+            release,
+            rocm5,
+            nightly,
+        }) => build(!release, rocm5, nightly)?,
+        Subcommand::Zip(ZipCommand { release, rocm5 }) => build_and_zip(!release, rocm5),
+    })
+}
+
+fn build_and_zip(is_debug: bool, rocm5: bool) -> i32 {
+    let workspace = build_impl(is_debug, rocm5, false).unwrap();
+    os::zip(workspace)
+}
+
+#[derive(Deserialize)]
+struct ZludaMetadata {
+    zluda: Project,
+}
+
+#[derive(Deserialize, Default, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
 struct Project {
-    #[cfg_attr(unix, allow(unused))]
-    is_32bit: bool,
-    #[cfg_attr(unix, allow(unused))]
-    manifest_path: PathBuf,
+    #[serde(skip_deserializing)]
     name: String,
+    #[serde(skip_deserializing)]
     target_name: String,
-    target_kind: ProjectTarget,
-    meta: ZludaMetadata,
+    #[serde(skip_deserializing)]
+    kind: TargetKind,
+    #[serde(default)]
+    windows_nightly: bool,
+    #[serde(default)]
+    windows_only: bool,
+    #[serde(default)]
+    windows_rocm5_unavailable: bool,
+    #[serde(default)]
+    debug_only: bool,
+    #[serde(default)]
+    broken: bool,
+    #[serde(default)]
+    skip_dump_link: bool,
+    #[serde(default)]
+    skip_zip: bool,
+    #[serde(default)]
+    linux_names: Vec<String>,
+    #[serde(default)]
+    dump_names: Vec<String>,
+    #[serde(default)]
+    dump_nvidia_names: Vec<String>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+enum TargetKind {
+    #[default]
+    Binary,
+    Cdylib,
+}
+
+struct Workspace {
+    pub cargo: String,
+    pub project_root: PathBuf,
+    pub projects: Vec<Project>,
+    pub target_directory: Utf8PathBuf,
+}
+
+impl Workspace {
+    fn open(is_debug: bool, rocm5: bool, nightly: bool) -> Result<Self, DynError> {
+        let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let project_root = Self::project_root()?;
+        let mut cmd = cargo_metadata::MetadataCommand::new();
+        cmd.cargo_path(&cargo).current_dir(&project_root).no_deps();
+        let cargo_metadata = cmd.exec()?;
+        let projects = cargo_metadata
+            .packages
+            .into_iter()
+            .filter_map(Project::new)
+            .filter(|p| !p.skip_build(is_debug, rocm5, nightly))
+            .collect::<Vec<_>>();
+        let mut target_directory = cargo_metadata.target_directory;
+        target_directory.push(if is_debug { "debug" } else { "release" });
+        Ok(Workspace {
+            cargo,
+            project_root,
+            projects,
+            target_directory,
+        })
+    }
+
+    fn project_root() -> Result<PathBuf, DynError> {
+        Ok(Path::new(&env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(1)
+            .ok_or::<DynError>("CARGO_MANIFEST_DIR".into())?
+            .to_path_buf())
+    }
+
+    fn cargo_command(&self) -> Command {
+        let mut command = Command::new(&self.cargo);
+        command.current_dir(&self.project_root);
+        command
+    }
 }
 
 impl Project {
-    fn try_new(p: Package, is_32bit: bool) -> Option<Project> {
-        let name = p.name;
-        let manifest_path = p.manifest_path.into();
-        serde_json::from_value::<Option<Metadata>>(p.metadata)
-            .unwrap()
-            .map(|m| {
-                let (target_name, target_kind) = p
-                    .targets
-                    .into_iter()
-                    .find_map(|target| {
-                        if target.is_cdylib() {
-                            Some((target.name, ProjectTarget::Cdylib))
-                        } else if target.is_bin() {
-                            Some((target.name, ProjectTarget::Bin))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap();
-                Self {
-                    manifest_path,
-                    name,
-                    target_name,
-                    target_kind,
-                    meta: m.zluda,
-                    is_32bit,
-                }
-            })
-    }
-
-    #[cfg(windows)]
-    fn zip_compiler_output(&self) -> bool {
-        self.meta.windows_paths(self.is_32bit).is_empty()
-    }
-
-    #[cfg(unix)]
-    fn prefix(&self) -> &'static str {
-        match self.target_kind {
-            ProjectTarget::Bin => "",
-            ProjectTarget::Cdylib => "lib",
+    fn new(json_pkg: cargo_metadata::Package) -> Option<Self> {
+        let project_metadata =
+            serde_json::from_value::<Option<ZludaMetadata>>(json_pkg.metadata).unwrap()?;
+        let mut project = project_metadata.zluda;
+        project.name = json_pkg.name;
+        if let Some((target_name, kind)) = json_pkg.targets.into_iter().find_map(|t| {
+            match t.kind.first().map(std::ops::Deref::deref) {
+                Some("cdylib") => Some((t.name, TargetKind::Cdylib)),
+                Some("bin") => Some((t.name, TargetKind::Binary)),
+                _ => None,
+            }
+        }) {
+            project.target_name = target_name;
+            project.kind = kind;
         }
+        Some(project)
     }
 
-    #[cfg(not(unix))]
-    fn prefix(&self) -> &'static str {
-        ""
-    }
-
-    #[cfg(unix)]
-    fn suffix(&self) -> &'static str {
-        match self.target_kind {
-            ProjectTarget::Bin => "",
-            ProjectTarget::Cdylib => ".so",
+    fn skip_build(&self, is_debug: bool, rocm5: bool, nightly: bool) -> bool {
+        if self.broken {
+            return true;
         }
-    }
-
-    #[cfg(not(unix))]
-    fn suffix(&self) -> &'static str {
-        match self.target_kind {
-            ProjectTarget::Bin => ".exe",
-            ProjectTarget::Cdylib => ".dll",
+        if !cfg!(windows) && self.windows_only {
+            return true;
         }
-    }
-
-    // Returns tuple:
-    // * symlink file path (relative to the root of build dir)
-    // * symlink absolute file path
-    // * target actual file (relative to symlink file)
-    #[cfg_attr(not(unix), allow(unused))]
-    fn linux_symlinks<'a>(
-        &'a self,
-        target_dir: &'a PathBuf,
-        profile: &'a str,
-        libname: &'a str,
-    ) -> impl Iterator<Item = (&'a str, PathBuf, PathBuf)> + 'a {
-        Self::relative_paths(
-            self,
-            target_dir,
-            profile,
-            libname,
-            self.meta.linux_symlinks.as_slice(),
-        )
-    }
-
-    #[cfg(windows)]
-    fn additional_windows_paths<'a>(
-        &'a self,
-        target_dir: &'a PathBuf,
-        profile: &'a str,
-        libname: &'a str,
-    ) -> impl Iterator<Item = WindowsPaths> + 'a {
-        Self::relative_paths(
-            self,
-            target_dir,
-            profile,
-            libname,
-            self.meta.windows_paths(self.is_32bit).as_slice(),
-        )
-        .map(move |(.., full_path, target)| {
-            let copy_output = full_path.clone();
-            let mut compilation_output = copy_output.clone();
-            compilation_output.pop();
-            compilation_output.push(target);
-            WindowsPaths {
-                zip_path: pathdiff::diff_paths(&copy_output, target_dir.join(profile)).unwrap(),
-                copy_output,
-                compilation_output,
-            }
-        })
-        .chain(
-            self.meta
-                .windows_extra_files
-                .iter()
-                .map(move |(source, target)| {
-                    let mut existing_file = self.manifest_path.clone();
-                    existing_file.pop();
-                    existing_file.push(target);
-                    let mut new_file = target_dir.clone();
-                    new_file.extend([profile, source]);
-                    WindowsPaths {
-                        zip_path: pathdiff::diff_paths(&new_file, target_dir.join(profile))
-                            .unwrap(),
-                        compilation_output: existing_file,
-                        copy_output: new_file,
-                    }
-                }),
-        )
-    }
-
-    fn relative_paths<'a>(
-        &'a self,
-        target_dir: &'a PathBuf,
-        profile: &'a str,
-        libname: &'a str,
-        source: &'a [String],
-    ) -> impl ExactSizeIterator<Item = (&'a str, PathBuf, PathBuf)> + 'a {
-        source.iter().map(move |source| {
-            let mut link: PathBuf = target_dir.clone();
-            link.extend([profile, source]);
-            let relative_link = PathBuf::from(source);
-            let ancestors = relative_link.as_path().ancestors().count();
-            let mut target = std::iter::repeat_with(|| "../").take(ancestors - 2).fold(
-                PathBuf::new(),
-                |mut buff, segment| {
-                    buff.push(segment);
-                    buff
-                },
-            );
-            target.push(libname);
-            (&**source, link, target)
-        })
-    }
-
-    fn file_name(&self) -> String {
-        let target_name = &self.target_name;
-        let prefix = self.prefix();
-        let suffix = self.suffix();
-        format!("{prefix}{target_name}{suffix}")
-    }
-}
-
-#[cfg(windows)]
-struct WindowsPaths {
-    // relative path inside zip file, excluding "zluda" prefix
-    zip_path: PathBuf,
-    // this is where the file is created by the compiler
-    compilation_output: PathBuf,
-    // this is where the file is to be copied to
-    copy_output: PathBuf,
-}
-
-#[derive(Clone, Copy)]
-enum ProjectTarget {
-    Cdylib,
-    Bin,
-}
-
-#[derive(Deserialize)]
-struct Metadata {
-    zluda: ZludaMetadata,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ZludaMetadata {
-    #[serde(default)]
-    linux_only: bool,
-    #[serde(default)]
-    windows_only: bool,
-    #[serde(default = "always_true", rename = "64bit")]
-    is_64bit: bool,
-    #[serde(default, rename = "32bit")]
-    is_32bit: bool,
-    #[serde(default)]
-    debug_only: bool,
-    #[cfg_attr(not(unix), allow(unused))]
-    #[serde(default)]
-    linux_symlinks: Vec<String>,
-    #[serde(default)]
-    #[cfg_attr(unix, allow(unused))]
-    windows_paths: Vec<String>,
-    #[serde(default)]
-    #[cfg_attr(unix, allow(unused))]
-    windows32_paths: Vec<String>,
-    #[serde(default)]
-    #[cfg_attr(unix, allow(unused))]
-    windows_extra_files: HashMap<String, String>,
-}
-
-impl ZludaMetadata {
-    #[cfg(windows)]
-    fn windows_paths(&self, is_32bit: bool) -> &Vec<String> {
-        if is_32bit && !self.windows32_paths.is_empty() {
-            &self.windows32_paths
-        } else {
-            &self.windows_paths
+        if cfg!(windows) && rocm5 && self.windows_rocm5_unavailable {
+            return true;
         }
-    }
-}
-
-fn always_true() -> bool {
-    true
-}
-
-fn main() {
-    let options = match options().run_inner(Args::current_args()) {
-        Ok(b) => b,
-        Err(err) => match build().to_options().run_inner(Args::current_args()) {
-            Ok(b) => Options::Build(b),
-            Err(_) => {
-                err.print_message(100);
-                std::process::exit(err.exit_code());
-            }
-        },
-    };
-    match options {
-        Options::Build(b) => {
-            compile(b);
+        if !is_debug && self.debug_only {
+            return true;
         }
-        Options::Zip(b) => zip(b),
+        if cfg!(windows) && !nightly && self.windows_nightly {
+            return true;
+        }
+        false
     }
 }
 
-fn compile(b: Build) -> (PathBuf, String, Vec<Project>) {
-    let cargo_flags = sniff_out_cargo_flags(&b.cargo_arguments);
-    let meta = MetadataCommand::new().no_deps().exec().unwrap();
-    let mut target_directory = meta.target_directory.into_std_path_buf();
-    if let Some(target) = &cargo_flags.target {
-        target_directory.push(target);
-    }
-    let projects = meta
-        .packages
-        .into_iter()
-        .filter_map(|pkg| Project::try_new(pkg, cargo_flags.is_32bit))
-        .filter(|project| {
-            if cargo_flags.is_32bit {
-                if !project.meta.is_32bit {
-                    return false;
-                }
-            } else {
-                if !project.meta.is_64bit {
-                    return false;
-                }
-            }
-            if project.meta.linux_only && cfg!(windows) {
-                return false;
-            }
-            if project.meta.windows_only && cfg!(not(windows)) {
-                return false;
-            }
-            if project.meta.debug_only && cargo_flags.profile != "debug" {
-                return false;
-            }
-            true
-        })
-        .collect::<Vec<_>>();
-    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let mut command = Command::new(&cargo);
+fn build(is_debug: bool, rocm5: bool, nightly: bool) -> Result<i32, DynError> {
+    build_impl(is_debug, rocm5, nightly)?;
+    Ok(0)
+}
+
+fn build_impl(is_debug: bool, rocm5: bool, nightly: bool) -> Result<Workspace, DynError> {
+    let workspace = Workspace::open(is_debug, rocm5, nightly)?;
+    let mut command = workspace.cargo_command();
     command.arg("build");
     command.arg("--locked");
-    for project in projects.iter() {
-        command.arg("--package");
-        command.arg(&project.name);
+    workspace
+        .projects
+        .iter()
+        .fold(&mut command, |command, proj| {
+            command.args(["-p", &proj.name])
+        });
+    if !is_debug {
+        command.arg("--release");
     }
-    command.args(b.cargo_arguments);
-    assert!(command.status().unwrap().success());
-    os::make_symlinks(&target_directory, &*projects, &*cargo_flags.profile);
-    (target_directory, cargo_flags.profile, projects)
-}
 
-fn sniff_out_cargo_flags(b: &[OsString]) -> CargoFlags {
-    let parsed_cargo_arguments = cargo().to_options().run_inner(b);
-    let (target, is_32bit) = match parsed_cargo_arguments.as_ref() {
-        Ok(Cargo {
-            target: Some(target),
-            ..
-        }) => (Some(target.clone()), target.starts_with("i686")),
-        Ok(Cargo { target: None, .. }) => (None, cfg!(target_pointer_width = "32")),
-        _ => (None, false),
-    };
-    let profile = match parsed_cargo_arguments {
-        Ok(Cargo {
-            release: Some(true),
-            ..
-        }) => "release".to_string(),
-        Ok(Cargo {
-            profile: Some(profile),
-            ..
-        }) => profile,
-        _ => "debug".to_string(),
-    };
-    CargoFlags {
-        profile,
-        target,
-        is_32bit,
+    let mut features = Vec::new();
+    if cfg!(windows) {
+        // Should we allow ROCm 5 for Linux?
+        if rocm5 {
+            features.push("rocm5");
+        }
+
+        if env::var("HIP_PATH").is_err() {
+            let hip_path = if rocm5 {
+                env::var("HIP_PATH_57").or_else(|_| env::var("HIP_PATH_55"))
+            } else {
+                env::var("HIP_PATH_71")
+                    .or_else(|_| env::var("HIP_PATH_64"))
+                    .or_else(|_| env::var("HIP_PATH_62"))
+                    .or_else(|_| env::var("HIP_PATH_61"))
+            };
+            if let Ok(hip_path) = hip_path {
+                env::set_var("HIP_PATH", hip_path);
+            } else {
+                return Err(
+                    "Could not find HIP SDK installed. Please check if HIP_PATH is set.".into(),
+                );
+            }
+        }
+
+        if nightly {
+            features.push("nightly");
+        }
     }
+    if !features.is_empty() {
+        command.args([vec!["--features"], features].concat());
+    }
+
+    let build_result = command.status()?.code().unwrap();
+    if build_result != 0 {
+        return Err(format!("{command:?} failed with exit code {build_result}").into());
+    }
+    os::create_dump_dir_and_symlinks(&workspace);
+    Ok(workspace)
 }
 
-struct CargoFlags {
-    profile: String,
-    target: Option<String>,
-    is_32bit: bool,
-}
+impl TargetKind {
+    #[cfg(unix)]
+    fn prefix(self) -> &'static str {
+        match self {
+            TargetKind::Binary => "",
+            TargetKind::Cdylib => "lib",
+        }
+    }
 
-fn zip(zip: Build) {
-    let (target_dir, profile, projects) = compile(zip);
-    os::zip(target_dir, profile, projects)
+    #[cfg(unix)]
+    fn suffix(self) -> &'static str {
+        match self {
+            TargetKind::Binary => "",
+            TargetKind::Cdylib => ".so",
+        }
+    }
+
+    #[cfg(windows)]
+    fn suffix(self) -> &'static str {
+        match self {
+            TargetKind::Binary => ".exe",
+            TargetKind::Cdylib => ".dll",
+        }
+    }
 }
 
 #[cfg(unix)]
 mod os {
-    use flate2::write::GzEncoder;
-    use flate2::Compression;
+    use crate::Workspace;
+    use cargo_metadata::camino::Utf8PathBuf;
+    use flate2::{write::GzEncoder, Compression};
     use std::{
-        fs::{self, File},
-        io::Write,
-        path::PathBuf,
-        process::Command,
+        fs::File,
+        time::{Duration, SystemTime},
     };
 
-    pub fn make_symlinks(
-        target_directory: &std::path::PathBuf,
-        projects: &[super::Project],
-        profile: &str,
-    ) {
+    pub(crate) fn create_dump_dir_and_symlinks(workspace: &Workspace) {
+        use std::fs;
+        let mut dump_dir = workspace.target_directory.clone();
+        dump_dir.push("dump");
+        fs::create_dir_all(&dump_dir).unwrap();
+        let mut dump_nvidia_dir = dump_dir.clone();
+        dump_nvidia_dir.set_file_name("dump_nvidia");
+        fs::create_dir_all(&dump_nvidia_dir).unwrap();
+        for project in workspace.projects.iter() {
+            let dst = format!(
+                "{}{}{}",
+                project.kind.prefix(),
+                project.target_name,
+                project.kind.suffix()
+            );
+            let dump_dst = format!("../{}", dst);
+            for src_file in project.linux_names.iter() {
+                force_symlink(&dst, &workspace.target_directory, src_file);
+                if project.skip_dump_link {
+                    continue;
+                }
+                force_symlink(&dump_dst, &dump_dir, src_file);
+            }
+            for src_file in project.dump_names.iter() {
+                force_symlink(&dump_dst, &dump_dir, src_file);
+            }
+            for src_file in project.dump_nvidia_names.iter() {
+                force_symlink(&dump_dst, &dump_nvidia_dir, src_file);
+            }
+        }
+    }
+
+    fn force_symlink(dst: &str, src_dir: &Utf8PathBuf, src_file: &str) {
+        use std::io::ErrorKind;
         use std::os::unix::fs as unix_fs;
-        for project in projects.iter() {
-            let libname = project.file_name();
-            for (_, full_path, target) in
-                project.linux_symlinks(target_directory, profile, &libname)
-            {
-                let mut dir = full_path.clone();
-                assert!(dir.pop());
-                fs::create_dir_all(dir).unwrap();
-                fs::remove_file(&full_path).ok();
-                unix_fs::symlink(&target, full_path).unwrap();
+        let mut src = src_dir.clone();
+        src.push(src_file);
+        match unix_fs::symlink(dst, &src) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                let current_dst = std::fs::read_link(&src);
+                match current_dst {
+                    Ok(current_dst) if current_dst.to_str() == Some(dst) => {
+                        return;
+                    }
+                    _ => {
+                        std::fs::remove_file(&src).unwrap();
+                        unix_fs::symlink(dst, &src).unwrap();
+                    }
+                }
             }
+            Err(err) => panic!("{:?}", err),
         }
     }
 
-    pub(crate) fn zip(target_dir: PathBuf, profile: String, projects: Vec<crate::Project>) {
-        strip_rocm_versions_from_dt_needed(&target_dir, &profile);
-        let mut tar_gz =
-            File::create(format!("{}/{profile}/zluda.tar.gz", target_dir.display())).unwrap();
-        let enc = GzEncoder::new(&mut tar_gz, Compression::default());
-        let mut tar = tar::Builder::new(enc);
-        // Leads to broken tar archives on WSL
-        tar.sparse(false);
-        tar.follow_symlinks(false);
-        for project in projects.iter() {
-            let file_name = project.file_name();
-            let mut file =
-                File::open(format!("{}/{profile}/{file_name}", target_dir.display())).unwrap();
-            tar.append_file(format!("zluda/{file_name}"), &mut file)
+    pub(crate) fn zip(workspace: Workspace) -> i32 {
+        let mut target_file = workspace.target_directory.clone();
+        target_file.push("zluda.tar.gz");
+        let gz_file = File::create(target_file).unwrap();
+        let gz = GzEncoder::new(gz_file, Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        let time = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        for project in workspace.projects {
+            if project.skip_zip {
+                continue;
+            }
+            let mut src_file = File::open(format!(
+                "{}/{}{}{}",
+                &workspace.target_directory,
+                project.kind.prefix(),
+                project.target_name,
+                project.kind.suffix()
+            ))
+            .unwrap();
+            let file_name = format!(
+                "{}{}{}",
+                project.kind.prefix(),
+                project.target_name,
+                project.kind.suffix()
+            );
+            tar.append_file(format!("zluda/{file_name}"), &mut src_file)
                 .unwrap();
-            for (source, full_path, _) in project.linux_symlinks(&target_dir, &profile, &file_name)
-            {
-                tar.append_path_with_name(&full_path, format!("zluda/{source}"))
+            for linux_name in project.linux_names.iter() {
+                let mut header = tar_header_symlink(time);
+                tar.append_link(&mut header, format!("zluda/{}", linux_name), &file_name)
                     .unwrap();
+                if project.skip_dump_link {
+                    continue;
+                }
+                let mut header = tar_header_symlink(time);
+                tar.append_link(
+                    &mut header,
+                    format!("zluda/dump/{}", linux_name),
+                    format!("../{file_name}"),
+                )
+                .unwrap();
+            }
+            for dump_name in project.dump_names.iter() {
+                let mut header = tar_header_symlink(time);
+                tar.append_link(
+                    &mut header,
+                    format!("zluda/dump/{}", dump_name),
+                    format!("../{file_name}"),
+                )
+                .unwrap();
+            }
+            for dump_name in project.dump_nvidia_names.iter() {
+                let mut header = tar_header_symlink(time);
+                tar.append_link(
+                    &mut header,
+                    format!("zluda/dump_nvidia/{}", dump_name),
+                    format!("../{file_name}"),
+                )
+                .unwrap();
             }
         }
-        tar.into_inner().unwrap().finish().unwrap().flush().unwrap();
+        tar.finish().unwrap();
+        0
     }
 
-    // Unfortunately when linking against amdhip64.so, it encodes SONAME with versioned
-    // filename, e.g. libamdhip64.so.7. We instead want to link against unversioned
-    // libamdhip64.so to allow compatibility with both ROCm 6 and ROCm 7
-    // We use `patchelf`. I've tried arwen library: https://nichmor.github.io/arwen/,
-    // it supports replacing DT_NEEDED entries, but it seems to produce broken binaries
-    pub fn strip_rocm_versions_from_dt_needed(target_dir: &PathBuf, profile: &str) {
-        let current_dir = target_dir.join(profile);
-        patch_single_lib(
-            &current_dir,
-            "libcuda.so",
-            &[
-                ("libamdhip64.so.6", "libamdhip64.so"),
-                ("libamdhip64.so.7", "libamdhip64.so"),
-            ],
-        );
-        patch_single_lib(
-            &current_dir,
-            "libcudnn.so.8",
-            &[
-                ("libamdhip64.so.6", "libamdhip64.so"),
-                ("libamdhip64.so.7", "libamdhip64.so"),
-                // We also link to MIOpen, but it's `libMIOpen.so.1` on both ROCm 6 and 7
-            ],
-        );
-        patch_single_lib(
-            &current_dir,
-            "libcudnn.so.9",
-            &[
-                ("libamdhip64.so.6", "libamdhip64.so"),
-                ("libamdhip64.so.7", "libamdhip64.so"),
-                // We also link to MIOpen, but it's `libMIOpen.so.1` on both ROCm 6 and 7
-            ],
-        );
-        patch_single_lib(
-            &current_dir,
-            "libcublas.so",
-            &[
-                ("librocblas.so.4", "librocblas.so"),
-                ("librocblas.so.5", "librocblas.so"),
-            ],
-        );
-        patch_single_lib(
-            &current_dir,
-            "libcusparse.so",
-            &[
-                ("librocsparse.so.1", "librocsparse.so"),
-                ("librocsparse.so.2", "librocsparse.so"),
-            ],
-        );
-        patch_single_lib(
-            &current_dir,
-            "libcublaslt.so",
-            &[
-                ("libhipblaslt.so.0", "libhipblaslt.so"),
-                ("libhipblaslt.so.1", "libhipblaslt.so"),
-            ],
-        );
-        patch_single_lib(
-            &current_dir,
-            "libnvml.so",
-            &[
-                ("librocm_smi64.so.7", "librocm_smi64.so"),
-                // Not a typo, ROCm 7 ships with librocm_smi64.so.1
-                ("librocm_smi64.so.1", "librocm_smi64.so"),
-            ],
-        );
-        patch_single_lib(
-            &current_dir,
-            "libcufft.so",
-            &[("libhipfft.so.0", "libhipfft.so")],
-        );
-    }
-
-    fn patch_single_lib(current_dir: &PathBuf, lib: &str, from_to: &[(&str, &str)]) {
-        let mut cmd = Command::new("patchelf");
-        cmd.current_dir(&current_dir);
-        for (from, to) in from_to {
-            cmd.args(&["--replace-needed", from, to]);
-        }
-        cmd.arg(lib);
-        let status = cmd.status().unwrap();
-        assert!(status.success());
+    fn tar_header_symlink(time: Duration) -> tar::Header {
+        let mut header = tar::Header::new_gnu();
+        header.set_mtime(time.as_secs());
+        header.set_entry_type(tar::EntryType::Symlink);
+        header
     }
 }
 
 #[cfg(windows)]
 mod os {
-    use super::WindowsPaths;
-    use std::{fs::File, io, path::PathBuf};
-    use zip::{write::SimpleFileOptions, ZipWriter};
+    use crate::Workspace;
+    use std::{convert::TryFrom, fs::File};
 
-    pub fn make_symlinks(
-        target_directory: &std::path::PathBuf,
-        projects: &[super::Project],
-        profile: &str,
-    ) {
-        for project in projects.iter() {
-            let libname = project.file_name();
-            for WindowsPaths {
-                compilation_output,
-                copy_output,
-                ..
-            } in project.additional_windows_paths(target_directory, profile, &libname)
-            {
-                std::fs::create_dir_all(copy_output.parent().unwrap()).unwrap();
-                std::fs::copy(compilation_output, copy_output).unwrap();
-            }
+    // This is 100% intentional, we don't want symlinks on Windows since
+    // we use a completely different scheme for injections there
+    pub(crate) fn create_dump_dir_and_symlinks(_: &Workspace) {}
+
+    pub(crate) fn zip(workspace: Workspace) -> i32 {
+        fn get_zip_entry_options(
+            f: &File,
+            time_offset: time::UtcOffset,
+        ) -> Option<zip::write::FileOptions> {
+            let time = f.metadata().unwrap().modified().unwrap();
+            let time = time::OffsetDateTime::from(time).to_offset(time_offset);
+            Some(
+                zip::write::FileOptions::default()
+                    .last_modified_time(zip::DateTime::try_from(time).unwrap()),
+            )
         }
-    }
-
-    pub(crate) fn zip(target_dir: PathBuf, profile: String, projects: Vec<crate::Project>) {
-        let zip_file =
-            File::create(format!("{}/{profile}/zluda.zip", target_dir.display())).unwrap();
-        let mut zip = ZipWriter::new(zip_file);
-        zip.add_directory("zluda", SimpleFileOptions::default())
+        let mut target_file = workspace.target_directory.clone();
+        target_file.push("zluda.zip");
+        let zip_archive = File::create(target_file).unwrap();
+        let mut zip_writer = zip::write::ZipWriter::new(zip_archive);
+        let time_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+        for p in workspace.projects {
+            if p.skip_zip {
+                continue;
+            }
+            let mut src_file = File::open(format!(
+                "{}/{}{}",
+                &workspace.target_directory,
+                p.target_name,
+                p.kind.suffix()
+            ))
             .unwrap();
-        for project in projects.iter() {
-            let libname = project.file_name();
-            if project.zip_compiler_output() {
-                let mut file =
-                    File::open(format!("{}/{profile}/{libname}", target_dir.display())).unwrap();
-                let file_options = file_options_from_time(&file).unwrap_or_default();
-                zip.start_file(format!("zluda/{libname}"), file_options)
-                    .unwrap();
-                io::copy(&mut file, &mut zip).unwrap();
-            }
-            for WindowsPaths {
-                compilation_output,
-                zip_path,
-                ..
-            } in project.additional_windows_paths(&target_dir, &profile, &libname)
-            {
-                let mut file = File::open(compilation_output).unwrap();
-                let file_options = file_options_from_time(&file).unwrap();
-                let zip_path = zip_path.to_str().unwrap().replace("\\", "/");
-                zip.start_file(format!("zluda/{zip_path}"), file_options)
-                    .unwrap();
-                io::copy(&mut file, &mut zip).unwrap();
-            }
+            zip_writer
+                .start_file(
+                    format!("zluda/{}{}", p.target_name, p.kind.suffix()),
+                    get_zip_entry_options(&src_file, time_offset)
+                        .unwrap_or(zip::write::FileOptions::default()),
+                )
+                .unwrap();
+            std::io::copy(&mut src_file, &mut zip_writer).unwrap();
         }
-        zip.finish().unwrap();
-    }
-
-    fn file_options_from_time(from: &File) -> io::Result<SimpleFileOptions> {
-        let metadata = from.metadata()?;
-        let modified = metadata.modified()?;
-        let modified = time::OffsetDateTime::from(modified);
-        Ok(SimpleFileOptions::default().last_modified_time(
-            zip::DateTime::try_from(modified).map_err(|err| io::Error::other(err))?,
-        ))
+        zip_writer.finish().unwrap();
+        0
     }
 }

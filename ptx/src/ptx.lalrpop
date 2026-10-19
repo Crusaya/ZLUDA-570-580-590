@@ -1,0 +1,2912 @@
+use crate::ast;
+use crate::lalrpop::*;
+
+use either::Either;
+use lalrpop_util::ParseError;
+
+grammar<'err>(errors: &'err mut Vec<ParseError<usize, Token<'input>, ast::PtxError>>);
+
+extern {
+    type Error = ast::PtxError;
+}
+
+match {
+    r"\s+" => { },
+    r"//[^\n\r]*[\n\r]*" => { },
+    r"/\*[^*]*\*+(?:[^/*][^*]*\*+)*/" => { },
+    r"0[fF][0-9a-zA-Z]{8}" => F32NumToken,
+    r"0[dD][0-9a-zA-Z]{16}" => F64NumToken,
+    r"0[xX][0-9a-zA-Z]+U?" => HexNumToken,
+    r"[0-9]+U?" => DecimalNumToken,
+    r#""[^"]*""# => String,
+    r"[0-9]+\.[0-9]+" => VersionNumber,
+    "!",
+    "(", ")",
+    "+",
+    "-",
+    "_",
+    ",",
+    ".",
+    ":",
+    ";",
+    "@",
+    "[", "]",
+    "{", "}",
+    "<", ">",
+    "|",
+    "=",
+    ".1d",
+    ".2d",
+    ".3d",
+    ".a1d",
+    ".a2d",
+    ".acq_rel",
+    ".acquire",
+    ".add",
+    ".address_size",
+    ".align",
+    ".aligned",
+    ".all",
+    ".and",
+    ".any",
+    ".approx",
+    ".b",
+    ".b16",
+    ".b32",
+    ".b64",
+    ".b8",
+    ".ballot",
+    ".bf16",
+    ".bfly",
+    ".ca",
+    ".callprototype",
+    ".cas",
+    ".cc",
+    ".cg",
+    ".clamp",
+    ".common",
+    ".const",
+    ".cs",
+    ".cta",
+    ".cv",
+    ".dec",
+    ".down",
+    ".entry",
+    ".eq",
+    ".equ",
+    ".exch",
+    ".extern",
+    ".f16",
+    ".f16x2",
+    ".f32",
+    ".f64",
+    ".file",
+    ".ftz",
+    ".full",
+    ".func",
+    ".ge",
+    ".geu",
+    ".gl",
+    ".global",
+    ".gpu",
+    ".gt",
+    ".gtu",
+    ".hi",
+    ".hs",
+    ".idx",
+    ".inc",
+    ".l",
+    ".le",
+    ".leu",
+    ".level",
+    ".lo",
+    ".loc",
+    ".local",
+    ".ls",
+    ".lt",
+    ".ltu",
+    ".lu",
+    ".m8n8",
+    ".max",
+    ".maxnreg",
+    ".maxntid",
+    ".minnctapersm",
+    ".min",
+    ".nan",
+    ".NaN",
+    ".nc",
+    ".ne",
+    ".neu",
+    ".noftz",
+    ".noreturn",
+    ".num",
+    ".or",
+    ".param",
+    ".popc",
+    ".pragma",
+    ".pred",
+    ".ptr",
+    ".r",
+    ".red",
+    ".reg",
+    ".relaxed",
+    ".release",
+    ".reqntid",
+    ".rm",
+    ".rmi",
+    ".rn",
+    ".rni",
+    ".rp",
+    ".rpi",
+    ".rz",
+    ".rzi",
+    ".s16",
+    ".s32",
+    ".s64",
+    ".s8" ,
+    ".sat",
+    ".section",
+    ".shared",
+    ".shiftamt",
+    ".surfref",
+    ".sync",
+    ".sys",
+    ".target",
+    ".texref",
+    ".to",
+    ".trap",
+    ".u16",
+    ".u32",
+    ".u64",
+    ".u8" ,
+    ".uni",
+    ".up",
+    ".v2",
+    ".v4",
+    ".version",
+    ".visible",
+    ".volatile",
+    ".warp",
+    ".wb",
+    ".weak",
+    ".wide",
+    ".wrap",
+    ".wt",
+    ".x4",
+    ".xor",
+    ".zero",
+} else {
+    // IF YOU ARE ADDING A NEW TOKEN HERE ALSO ADD IT BELOW TO ExtendedID
+    "abs",
+    "activemask",
+    "add",
+    "addc",
+    "and",
+    "atom",
+    "bar",
+    "barrier",
+    "bfe",
+    "bfi",
+    "bfind",
+    "bra",
+    "brev",
+    "brkpt",
+    "call",
+    "clz",
+    "cos",
+    "cvt",
+    "cvta",
+    "debug",
+    "div",
+    "dp4a",
+    "ex2",
+    "exit",
+    "fma",
+    "function_name",
+    "generic",
+    "inlined_at",
+    "isspacep",
+    "ld",
+    "ldmatrix",
+    "lg2",
+    "mad",
+    "madc",
+    "map_f64_to_f32",
+    "match",
+    "max",
+    "membar",
+    "min",
+    "mov",
+    "mul",
+    "mul24",
+    "nanosleep",
+    "neg",
+    "not",
+    "or",
+    "popc",
+    "prmt",
+    "rcp",
+    "red",
+    "rem",
+    "ret",
+    "rsqrt",
+    "sad",
+    "selp",
+    "set",
+    "setp",
+    "shf",
+    "shfl",
+    "shl",
+    "shr",
+    "sin",
+    r"sm_[0-9]+" => ShaderModel,
+    "sqrt",
+    "st",
+    "sub",
+    "subc",
+    "suld",
+    "sust",
+    "tex",
+    "texmode_independent",
+    "texmode_unified",
+    "trap",
+    "vote",
+    "vshr",
+    "xor",
+} else {
+    "WARP_SZ",
+    // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#identifiers
+    r"[a-zA-Z][a-zA-Z0-9_$]*|[_$%][a-zA-Z0-9_$]+" => ID,
+    r"\.[a-zA-Z][a-zA-Z0-9_$]*" => DotID,
+}
+
+ExtendedID : &'input str = {
+    "abs",
+    "activemask",
+    "add",
+    "addc",
+    "and",
+    "atom",
+    "bar",
+    "barrier",
+    "bfe",
+    "bfi",
+    "bfind",
+    "bra",
+    "brev",
+    "brkpt",
+    "call",
+    "clz",
+    "cos",
+    "cvt",
+    "cvta",
+    "debug",
+    "div",
+    "dp4a",
+    "ex2",
+    "exit",
+    "fma",
+    "function_name",
+    "generic",
+    "inlined_at",
+    "isspacep",
+    "ld",
+    "ldmatrix",
+    "lg2",
+    "mad",
+    "madc",
+    "map_f64_to_f32",
+    "match",
+    "max",
+    "membar",
+    "min",
+    "mov",
+    "mul",
+    "mul24",
+    "nanosleep",
+    "neg",
+    "not",
+    "or",
+    "popc",
+    "prmt",
+    "rcp",
+    "red",
+    "rem",
+    "ret",
+    "rsqrt",
+    "sad",
+    "selp",
+    "set",
+    "setp",
+    "shf",
+    "shfl",
+    "shl",
+    "shr",
+    "sin",
+    ShaderModel,
+    "sqrt",
+    "st",
+    "sub",
+    "subc",
+    "suld",
+    "sust",
+    "tex",
+    "texmode_independent",
+    "texmode_unified",
+    "trap",
+    "vote",
+    "vshr",
+    "xor",
+    ID
+}
+
+ExtendedIDOrBlank = {
+    ExtendedID,
+    "_"
+}
+
+NumToken: (&'input str, u32, bool) = {
+    <s:HexNumToken> => {
+        if s.ends_with('U') {
+            (&s[2..s.len() - 1], 16, true)
+        } else {
+            (&s[2..], 16, false)
+        }
+    },
+    <s:DecimalNumToken> => {
+        let radix = if s.starts_with('0') { 8 } else { 10 };
+        if s.ends_with('U') {
+            (&s[..s.len() - 1], radix, true)
+        } else {
+            (s, radix, false)
+        }
+    },
+    "WARP_SZ" => {
+        ("32", 10, false)
+    }
+}
+
+F32Num: f32 = {
+    <s:F32NumToken> => {
+        match u32::from_str_radix(&s[2..], 16) {
+            Ok(x) => f32::from_bits(x),
+            Err(err) => {
+                errors.push(ParseError::User { error: ast::PtxError::from(err) });
+                0.0
+            }
+        }
+        
+    }
+}
+
+F64Num: f64 = {
+    <s:F64NumToken> => {
+        match u64::from_str_radix(&s[2..], 16) {
+            Ok(x) => f64::from_bits(x),
+            Err(err) => {
+                errors.push(ParseError::User { error: ast::PtxError::from(err) });
+                0.0
+            }
+        }
+    }
+}
+
+U8Num: u8 = {
+    <x:NumToken> => {
+        let (text, radix, _) = x;
+        match u8::from_str_radix(text, radix) {
+            Ok(x) => x,
+            Err(err) => {
+                errors.push(ParseError::User { error: ast::PtxError::from(err) });
+                0
+            }
+        }
+    }
+}
+
+U16Num: u16 = {
+    <x:NumToken> => {
+        let (text, radix, _) = x;
+        match u16::from_str_radix(text, radix) {
+            Ok(x) => x,
+            Err(err) => {
+                errors.push(ParseError::User { error: ast::PtxError::from(err) });
+                0
+            }
+        }
+    }
+}
+
+U32Num: u32 = {
+    <x:NumToken> => {
+        let (text, radix, _) = x;
+        match u32::from_str_radix(text, radix) {
+            Ok(x) => x,
+            Err(err) => {
+                errors.push(ParseError::User { error: ast::PtxError::from(err) });
+                0
+            }
+        }
+    }
+}
+
+// TODO: handle negative number properly
+S64Num: i64 = {
+    <sign:"-"?> <x:NumToken> => {
+        let (text, radix, _) = x;
+        match i64::from_str_radix(text, radix) {
+            Ok(x) => if sign.is_some() { -x } else { x },
+            Err(err) => {
+                errors.push(ParseError::User { error: ast::PtxError::from(err) });
+                0
+            }
+        }
+    }
+}
+
+pub Module: ast::Module<'input> = {
+    PtxVersion <sm_version:Target> <d:Directive*> => {
+        ast::Module { sm_version, directives: without_none(d) }
+    }
+};
+
+PtxVersion = {
+    ".version" VersionNumber
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#ptx-module-directives-target
+Target: u32 = {
+    ".target" <specifiers: CommaNonEmpty<TargetSpecifier>> => {
+        let max_sm_version = specifiers.iter().copied().fold(None, |acc, current| {
+            match (acc, current) {
+                (None, x) => x,
+                (Some(x), None) => Some(x),
+                (Some(x), Some(y)) => Some(u32::max(x, y)),
+            }
+        });
+        max_sm_version.unwrap_or_else(|| {
+            errors.push(ParseError::User { error: ast::PtxError::NoSmVersion });
+            0
+        })
+    }
+};
+
+TargetSpecifier: Option<u32> = {
+    <sm:ShaderModel> => {
+        let sm_version = sm[sm.find('_').unwrap() + 1 ..].parse::<u32>().unwrap_or_else(|err| {
+            errors.push(ParseError::User { error: ast::PtxError::from(err) });
+            0
+        });
+        Some(sm_version)
+    },
+    "texmode_unified" => None,
+    "texmode_independent" => None,
+    "debug" => None,
+    "map_f64_to_f32" => None
+};
+
+Directive: Option<ast::Directive<'input, ast::ParsedArgParams<'input>>> = {
+    AddressSize => None,
+    <f:Function> => {
+        let (linking, func) = f;
+        if linking == ast::LinkingDirective::Extern && func.body.is_some() {
+            errors.push(ParseError::User { error: ast::PtxError::ExternDefinition });
+        }
+        Some(ast::Directive::Method(linking, func))
+    },
+    File => None,
+    Section => None,
+    <linking:LinkingDirective> <var:MultiVariableDefinition> ";" => {
+        if var.len() != 1 {
+            errors.push(ParseError::User { error: ast::PtxError::UnexpectedMultivariable });
+        }
+        if linking == ast::LinkingDirective::Extern && matches!(var[0].suffix, Some(ast::DeclarationSuffix::Initializer(_))) {
+            errors.push(ParseError::User { error: ast::PtxError::ExternDefinition });
+        }
+        if linking != ast::LinkingDirective::Extern && var[0].variable.type_.layout().size() == 0 {
+            errors.push(ParseError::User { error: ast::PtxError::ExternDefinition });
+        }
+        Some(ast::Directive::Variable(linking, var.into_iter().next().unwrap()))
+    },
+    @L ! @R => {
+        let (start, _, end)= (<>);
+        errors.push(ParseError::User { error: 
+            ast::PtxError::UnrecognizedDirective { start, end }
+        });
+        None
+    }
+};
+
+AddressSize = {
+    ".address_size" U8Num
+};
+
+Function: (ast::LinkingDirective, ast::Function<'input, &'input str, ast::Statement<ast::ParsedArgParams<'input>>>) = {
+    <linking:LinkingDirective>
+    <func_directive:MethodDeclaration>
+    <tuning:TuningDirective*>
+    <body:FunctionBody> => {
+        (linking, ast::Function{func_directive, tuning, body})
+    }
+};
+ 
+LinkingDirective: ast::LinkingDirective = {
+    ".extern" => ast::LinkingDirective::Extern,
+    ".visible" => ast::LinkingDirective::Visible,
+    ".weak" => ast::LinkingDirective::Weak,
+    ".common" => ast::LinkingDirective::Common,
+     => ast::LinkingDirective::None,
+};
+
+TuningDirective: ast::TuningDirective = {
+    // not a performance tuning directive but fits here in the grammar
+    ".noreturn" => ast::TuningDirective::Noreturn,
+    ".maxnreg" <ncta:U32Num> => ast::TuningDirective::MaxNReg(ncta),
+    ".maxntid" <nx:U32Num> => ast::TuningDirective::MaxNtid(nx, 1, 1),
+    ".maxntid" <nx:U32Num> "," <ny:U32Num> => ast::TuningDirective::MaxNtid(nx, ny, 1),
+    ".maxntid" <nx:U32Num> "," <ny:U32Num> "," <nz:U32Num> => ast::TuningDirective::MaxNtid(nx, ny, nz),
+    ".reqntid" <nx:U32Num> => ast::TuningDirective::ReqNtid(nx, 1, 1),
+    ".reqntid" <nx:U32Num> "," <ny:U32Num> => ast::TuningDirective::ReqNtid(nx, ny, 1),
+    ".reqntid" <nx:U32Num> "," <ny:U32Num> "," <nz:U32Num> => ast::TuningDirective::ReqNtid(nx, ny, nz),
+    ".minnctapersm" <ncta:U32Num> => ast::TuningDirective::MinNCtaPerSm(ncta),
+};
+
+MethodDeclaration: ast::MethodDeclaration<'input, &'input str> = {
+    ".entry" <name:ExtendedID> <input_arguments:KernelArguments> => {
+        let return_arguments = Vec::new();
+        let name = ast::MethodName::Kernel(name);
+        ast::MethodDeclaration{ return_arguments, name, input_arguments }
+    },
+    ".func" <return_arguments:FnArguments?> <name:ExtendedID> <input_arguments:FnArguments> => {
+        let return_arguments = return_arguments.unwrap_or_else(|| Vec::new());
+        let name = ast::MethodName::Func(name);
+        ast::MethodDeclaration{ return_arguments, name, input_arguments }
+    }
+};
+
+KernelArguments: Vec<ast::VariableDeclaration<&'input str>> = {
+    "(" <args:Comma<VariableDeclarationEntry>> ")" => args
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/#kernel-function-parameter-attributes
+KernelParameterAttribute: ast::KernelParameterAttribute = {
+    ".ptr" <state_space:StateSpaceSpecifier?> => {
+        ast::KernelParameterAttribute::Pointer(state_space.unwrap_or(ast::StateSpace::Generic))
+    }
+};
+
+FnArguments: Vec<ast::VariableDeclaration<&'input str>> = {
+    "(" <args:Comma<VariableDeclarationFunc>> ")" => args
+};
+
+ProtoArguments: Vec<ast::VariableDeclaration<&'input str>> = {
+    "(" <args:Comma<VariableDeclarationProto>> ")" => args
+};
+
+FunctionBody: Option<Vec<ast::Statement<ast::ParsedArgParams<'input>>>> = {
+    "{" <s:Statement*> "}" => Some(without_none(s)),
+    ";" => None
+};
+
+StateSpaceSpecifier: ast::StateSpace = {
+    ".reg" => ast::StateSpace::Reg,
+    ".const" => ast::StateSpace::Const,
+    ".global" => ast::StateSpace::Global,
+    ".local" => ast::StateSpace::Local,
+    ".shared" => ast::StateSpace::Shared,
+    ".param" => ast::StateSpace::Param, // used to prepare function call
+};
+
+#[inline]
+ScalarType: ast::ScalarType = {
+    ".f16" => ast::ScalarType::F16,
+    ".f16x2" => ast::ScalarType::F16x2,
+    ".pred" => ast::ScalarType::Pred,
+    ".b8" => ast::ScalarType::B8,
+    ".b16" => ast::ScalarType::B16,
+    ".b32" => ast::ScalarType::B32,
+    ".b64" => ast::ScalarType::B64,
+    ".u8" => ast::ScalarType::U8,
+    ".u16" => ast::ScalarType::U16,
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+    ".s8" => ast::ScalarType::S8,
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+    ".f32" => ast::ScalarType::F32,
+    ".f64" => ast::ScalarType::F64,
+};
+
+Statement: Option<ast::Statement<ast::ParsedArgParams<'input>>> = {
+    <l:Label> => Some(ast::Statement::Label(l)),
+    <c:Callprototype> ";" => Some(ast::Statement::Callprototype(c)),
+    DebugDirective => None,
+    <v:MultiVariableDefinition> ";" => Some(ast::Statement::Variable(v)),
+    <p:PredAt?> <i:Instruction> ";" => Some(ast::Statement::Instruction(p, i)),
+    PragmaStatement => None,
+    "{" <s:Statement*> "}" => Some(ast::Statement::Block(without_none(s))),
+    @L ! ";" @R => {
+        let (start, _, _, end) = (<>);
+        errors.push(ParseError::User { error: 
+            ast::PtxError::UnrecognizedStatement { start, end }
+        });
+        None
+    }
+};
+
+PragmaStatement: () = {
+    ".pragma" String  ";"
+}
+
+DebugDirective: () = {
+    DebugLocation
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#debugging-directives-loc
+DebugLocation: () = {
+    ".loc" U32Num U32Num U32Num => {},
+    ".loc" U32Num U32Num U32Num "," "function_name" ExtendedID "," "inlined_at" U32Num U32Num U32Num => {},
+    ".loc" U32Num U32Num U32Num "," "function_name" ExtendedID "+" U32Num "," "inlined_at" U32Num U32Num U32Num => {}
+};
+
+Label: &'input str = {
+    <id:ExtendedID> ":" => id
+};
+
+Align: u32 = {
+    ".align" <x:U32Num> => x
+};
+
+Initializer: ast::Initializer<&'input str> = {
+    <init1:InitializerNoAdd> "+" <init2:Initializer> => ast::Initializer::Add(Box::new((init1, init2))),
+    InitializerNoAdd
+}
+
+InitializerNoAdd: ast::Initializer<&'input str> = {
+    <val:ImmediateValue> => ast::Initializer::Constant(val),
+    <id:ExtendedID> => ast::Initializer::Global(id),
+    "generic" "(" <id:ExtendedID> ")" => ast::Initializer::GenericGlobal(id),
+    "{" <array_init:Comma<Initializer>> "}" => ast::Initializer::Array(array_init)
+}
+
+VariableDeclarationFunc: ast::VariableDeclaration<&'input str> = {
+    <var:VariableDeclaration> =>
+        validate_variable_declaration_func(var, errors)
+}
+
+VariableDeclarationEntry: ast::VariableDeclaration<&'input str> = {
+    <var:VariableDeclaration> =>
+        validate_variable_declaration_entry(var, errors)
+}
+
+VariableDeclarationProto: ast::VariableDeclaration<&'input str> = {
+    <var:VariableDeclaration> =>
+        validate_variable_declaration_proto(var, errors)
+}
+
+VariableDeclaration: ast::VariableDeclaration<&'input str> = {
+    <variable:VariableDeclarationBegin> <name:ExtendedIDOrBlank> <dims:ArrayDimensions?> => {
+        let mut variable = variable.clone();
+        variable.name = name;
+        variable.type_ = make_array_type(variable.type_, dims, errors);
+        report_incorrect_variable(&variable, errors);
+        variable
+    }
+}
+
+MultiVariableDefinition: Vec<ast::MultiVariableDefinition<&'input str>> = {
+    <variable:VariableDeclarationBegin> <defs:CommaNonEmpty<VariableDefinitionOnce>> => {
+        defs.into_iter().map(|(name, def_suffix, initializer)| {
+            let mut variable = variable.clone();
+            variable.name = name;
+            let suffix = if let Some(Either::Left(count)) = def_suffix {
+                Some(ast::DeclarationSuffix::Count(count))
+            } else if let Some(initializer) = initializer {
+                Some(ast::DeclarationSuffix::Initializer(initializer))
+            } else {
+                None
+            };
+            if let Some(Either::Right(dims)) = def_suffix {
+                variable.type_ = make_array_type(variable.type_, Some(dims), errors);
+            }
+            let mut definition = ast::MultiVariableDefinition { variable, suffix };
+            report_incorrect_variable(&definition.variable, errors);
+            validate_variable_declaration2(&mut definition, errors);
+            definition
+        }).collect::<Vec<_>>()
+    }
+}
+
+VariableDeclarationBegin: ast::VariableDeclaration<&'input str> = {
+    <state_space:StateSpaceSpecifier> <align:Align> <v_len:VectorPrefix?> <type_:ScalarType> => {
+        let mut variable = ast::VariableDeclaration {
+            align: Some(align),
+            type_: ast::Type::Scalar(type_),
+            state_space,
+            name: ""
+        };
+        if let Some(v_len) = v_len {
+            variable.type_ = ast::Type::Vector(type_, v_len)
+        }
+        variable
+    },
+    <state_space:StateSpaceSpecifier> <v_len:VectorPrefix?> <type_:ScalarType> <attr:KernelParameterAttribute?> <align:Align?> => {
+        let mut variable = ast::VariableDeclaration {
+            align,
+            type_: ast::Type::Scalar(type_),
+            state_space,
+            name: ""
+        };
+        if let Some(v_len) = v_len {
+            variable.type_ = ast::Type::Vector(type_, v_len)
+        }
+        if let Some(attr) = attr {
+            variable.type_ = match attr {
+                ast::KernelParameterAttribute::Pointer(state_space) => {
+                    ast::Type::Pointer(type_, state_space)
+                }
+            };
+        }
+        variable
+    },
+    <state_space:StateSpaceSpecifier> <var:VariableDeclarationBeginNonScalarTypeWithAlign> => {
+        ast::VariableDeclaration {
+            align: var.1,
+            type_: var.0,
+            state_space,
+            name: ""
+        }
+    }
+}
+
+VariableDeclarationBeginNonScalarTypeWithAlign: (ast::Type, Option<u32>) = {
+    <align:Align> ".texref" => (ast::Type::Texref, Some(align)),
+    ".texref" <align:Align?> => (ast::Type::Texref, align),
+    <align:Align> ".surfref" => (ast::Type::Surfref, Some(align)),
+    ".surfref" <align:Align?> => (ast::Type::Surfref, align)
+}
+
+VariableDefinitionOnce: (&'input str, Option<Either<u32, Vec<u64>>>, Option<ast::Initializer<&'input str>>) = {
+    <name:ExtendedIDOrBlank> <suffix:VariableDefinitionSuffix?> <init:VariableDefinitionInitializer?> => (name, suffix, init)
+}
+
+VariableDefinitionSuffix: Either<u32, Vec<u64>> = {
+    // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parameterized-variable-names
+    "<" <n:U32Num> ">" => either::Left(n),
+    <dims:ArrayDimensions>  => either::Right(dims),
+}
+
+VariableDefinitionInitializer: ast::Initializer<&'input str> = {
+    "=" <init:Initializer> => init
+}
+
+#[inline]
+SizedScalarType: ast::ScalarType = {
+    ".b8" => ast::ScalarType::B8,
+    ".b16" => ast::ScalarType::B16,
+    ".b32" => ast::ScalarType::B32,
+    ".b64" => ast::ScalarType::B64,
+    ".u8" => ast::ScalarType::U8,
+    ".u16" => ast::ScalarType::U16,
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+    ".s8" => ast::ScalarType::S8,
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+    ".f16" => ast::ScalarType::F16,
+    ".f16x2" => ast::ScalarType::F16x2,
+    ".f32" => ast::ScalarType::F32,
+    ".f64" => ast::ScalarType::F64,
+}
+
+#[inline]
+LdStScalarType: ast::ScalarType = {
+    ".b8" => ast::ScalarType::B8,
+    ".b16" => ast::ScalarType::B16,
+    ".b32" => ast::ScalarType::B32,
+    ".b64" => ast::ScalarType::B64,
+    ".u8" => ast::ScalarType::U8,
+    ".u16" => ast::ScalarType::U16,
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+    ".s8" => ast::ScalarType::S8,
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+    ".f16" => ast::ScalarType::F16,
+    ".f32" => ast::ScalarType::F32,
+    ".f64" => ast::ScalarType::F64,
+}
+
+Instruction: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    InstLd,
+    InstMov,
+    InstMul,
+    InstMul24,
+    InstAdd,
+    InstAddC,
+    InstAddCC,
+    InstSetp,
+    InstNot,
+    InstBra,
+    InstCvt,
+    InstShl,
+    InstShr,
+    InstSt,
+    InstRet,
+    InstCvta,
+    InstCall,
+    InstAbs,
+    InstMad,
+    InstMadC,
+    InstMadCC,
+    InstFma,
+    InstOr,
+    InstAnd,
+    InstSub,
+    InstSubC,
+    InstSubCC,
+    InstMin,
+    InstMax,
+    InstRcp,
+    InstSelp,
+    InstBar,
+    InstAtom,
+    InstAtomCas,
+    InstDiv,
+    InstSqrt,
+    InstRsqrt,
+    InstNeg,
+    InstSin,
+    InstCos,
+    InstLg2,
+    InstEx2,
+    InstClz,
+    InstBrev,
+    InstPopc,
+    InstXor,
+    InstRem,
+    InstBfe,
+    InstBfi,
+    InstPrmt,
+    InstActivemask,
+    InstMembar,
+    InstTex,
+    InstSuld,
+    InstSust,
+    InstShfl,
+    InstShf,
+    InstVote,
+    InstExit,
+    InstBarRed,
+    InstTrap,
+    InstBrkpt,
+    InstVshr,
+    InstBfind,
+    InstSet,
+    InstDp4a,
+    InstMatch,
+    InstRed,
+    InstNanosleep,
+    InstIsspacep,
+    InstSad
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-ld
+InstLd: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "ld" <q:LdStQualifier?> <ss:LdNonGlobalStateSpace?> <cop:LdCacheOperator?> <t:LdStType> <dst:DstOperandVec> "," <src:MemoryOperand> => {
+        ast::Instruction::Ld(
+            ast::LdDetails {
+                qualifier: q.unwrap_or(ast::LdStQualifier::Weak),
+                state_space: ss.unwrap_or(ast::StateSpace::Generic),
+                caching: cop.unwrap_or(ast::LdCacheOperator::Cached),
+                typ: t,
+                non_coherent: false
+            },
+            ast::Arg2Ld { dst:dst, src:src }
+        )
+    },
+    "ld" <q:LdStQualifier?> ".global" <cop:LdCacheOperator?> <t:LdStType> <dst:DstOperandVec> "," <src:MemoryOperand> => {
+        ast::Instruction::Ld(
+            ast::LdDetails {
+                qualifier: q.unwrap_or(ast::LdStQualifier::Weak),
+                state_space: ast::StateSpace::Global,
+                caching: cop.unwrap_or(ast::LdCacheOperator::Cached),
+                typ: t,
+                non_coherent: false
+            },
+            ast::Arg2Ld { dst:dst, src:src }
+        )
+    },
+    "ld" ".global" <cop:LdNcCacheOperator?> ".nc" <t:LdStType> <dst:DstOperandVec> "," <src:MemoryOperand> => {
+        ast::Instruction::Ld(
+            ast::LdDetails {
+                qualifier: ast::LdStQualifier::Weak,
+                state_space: ast::StateSpace::Global,
+                caching: cop.unwrap_or(ast::LdCacheOperator::Cached),
+                typ: t,
+                non_coherent: true
+            },
+            ast::Arg2Ld { dst:dst, src:src }
+        )
+    }
+};
+
+LdStType: ast::Type = {
+    <v:VectorPrefix> <t:LdStScalarType> => ast::Type::Vector(t, v),
+    <t:LdStScalarType> => ast::Type::Scalar(t),
+}
+
+LdStQualifier: ast::LdStQualifier = {
+    ".weak" => ast::LdStQualifier::Weak,
+    ".volatile" => ast::LdStQualifier::Volatile,
+    ".relaxed" <s:MemScope> => ast::LdStQualifier::Relaxed(s),
+    ".acquire" <s:MemScope> => ast::LdStQualifier::Acquire(s),
+    ".release" <s:MemScope> => ast::LdStQualifier::Release(s),
+};
+
+MemScope: ast::MemScope = {
+    ".cta" => ast::MemScope::Cta,
+    ".gpu" => ast::MemScope::Gpu,
+    ".sys" => ast::MemScope::Sys
+};
+
+MembarLevel: ast::MemScope = {
+    ".cta" => ast::MemScope::Cta,
+    ".gl" => ast::MemScope::Gpu,
+    ".sys" => ast::MemScope::Sys
+};
+
+LdNonGlobalStateSpace: ast::StateSpace = {
+    ".const" => ast::StateSpace::Const,
+    ".local" => ast::StateSpace::Local,
+    ".param" => ast::StateSpace::Param,
+    ".shared" => ast::StateSpace::Shared,
+};
+
+LdCacheOperator: ast::LdCacheOperator = {
+    ".ca" => ast::LdCacheOperator::Cached,
+    ".cg" => ast::LdCacheOperator::L2Only,
+    ".cs" => ast::LdCacheOperator::Streaming,
+    ".lu" => ast::LdCacheOperator::LastUse,
+    ".cv" => ast::LdCacheOperator::Uncached,
+};
+
+LdNcCacheOperator: ast::LdCacheOperator = {
+    ".ca" => ast::LdCacheOperator::Cached,
+    ".cg" => ast::LdCacheOperator::L2Only,
+    ".cs" => ast::LdCacheOperator::Streaming,
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-mov
+InstMov: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "mov" <pref:VectorPrefix?> <t:MovScalarType> <dst:DstOperandVec> "," <src:SrcOperandVec> => {
+        let motype_ = match pref {
+            Some(vec_width) => ast::Type::Vector(t, vec_width),
+            None => ast::Type::Scalar(t)
+        };
+        let details = ast::MovDetails::new(motype_);
+        ast::Instruction::Mov(
+            details,
+            ast::Arg2Mov { dst, src }
+        )
+    }
+}
+
+#[inline]
+MovScalarType: ast::ScalarType = {
+    ".b16" => ast::ScalarType::B16,
+    ".b32" => ast::ScalarType::B32,
+    ".b64" => ast::ScalarType::B64,
+    ".u16" => ast::ScalarType::U16,
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+    ".f32" => ast::ScalarType::F32,
+    ".f64" => ast::ScalarType::F64,
+    ".pred" => ast::ScalarType::Pred
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-mul
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-mul
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#half-precision-floating-point-instructions-mul
+InstMul: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "mul" <d:MulDetails> <a:Arg3> => ast::Instruction::Mul(d, a)
+};
+
+MulDetails: ast::MulDetails = {
+    <ctr:MulIntControl> <t:UIntType> => ast::MulDetails::Unsigned(ast::MulInt{
+        typ: t,
+        control: ctr
+    }),
+    <ctr:MulIntControl> <t:SIntType> => ast::MulDetails::Signed(ast::MulInt{
+        typ: t,
+        control: ctr
+    }),
+    <f:ArithFloat> => ast::MulDetails::Float(f)
+};
+
+MulIntControl: ast::MulIntControl = {
+    ".hi" => ast::MulIntControl::High,
+    ".lo" => ast::MulIntControl::Low,
+    ".wide" => ast::MulIntControl::Wide
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-mul24
+InstMul24: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "mul24" <d:Mul24Details> <a:Arg3> => ast::Instruction::Mul24(d, a)
+};
+
+Mul24Details: ast::Mul24Details = {
+    <ctr:Mul24IntControl> <t:UIntType> => ast::Mul24Details::Unsigned(ast::Mul24Int{
+        typ: t,
+        control: ctr
+    }),
+    <ctr:Mul24IntControl> <t:SIntType> => ast::Mul24Details::Signed(ast::Mul24Int{
+        typ: t,
+        control: ctr
+    })
+};
+
+Mul24IntControl: ast::Mul24IntControl = {
+    ".hi" => ast::Mul24IntControl::High,
+    ".lo" => ast::Mul24IntControl::Low
+};
+
+#[inline]
+RoundingModeFloat : ast::RoundingMode = {
+    ".rn" => ast::RoundingMode::NearestEven,
+    ".rz" => ast::RoundingMode::Zero,
+    ".rm" => ast::RoundingMode::NegativeInf,
+    ".rp" => ast::RoundingMode::PositiveInf,
+};
+
+#[inline]
+RoundingModeFloatWithoutSign : ast::RoundingMode = {
+    ".rn" => ast::RoundingMode::NearestEven,
+    ".rz" => ast::RoundingMode::Zero,
+};
+
+RoundingModeInt : ast::RoundingMode = {
+    ".rni" => ast::RoundingMode::NearestEven,
+    ".rzi" => ast::RoundingMode::Zero,
+    ".rmi" => ast::RoundingMode::NegativeInf,
+    ".rpi" => ast::RoundingMode::PositiveInf,
+};
+
+IntType : ast::ScalarType = {
+    ".u16" => ast::ScalarType::U16,
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+};
+
+IntType3264: ast::ScalarType = {
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+}
+
+UIntType: ast::ScalarType = {
+    ".u16" => ast::ScalarType::U16,
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+};
+
+SIntType: ast::ScalarType = {
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+};
+
+FloatType: ast::ScalarType = {
+    ".bf16" => ast::ScalarType::BF16,
+    ".f16" => ast::ScalarType::F16,
+    ".f16x2" => ast::ScalarType::F16x2,
+    ".f32" => ast::ScalarType::F32,
+    ".f64" => ast::ScalarType::F64,
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#control-flow-directives-callprototype
+Callprototype: ast::Callprototype<&'input str> = {
+    <name:ExtendedID> ":" ".callprototype" <return_arguments:ProtoArguments?> "_" <input_arguments:ProtoArguments> => {
+        let return_arguments = return_arguments
+            .map(|args| {
+                args.into_iter()
+                    .map(|var| (var.type_, var.state_space))
+                    .collect()
+            })
+            .unwrap_or(Vec::new());
+        let input_arguments = input_arguments
+            .into_iter()
+            .map(|var| (var.type_, var.state_space))
+            .collect();
+        ast::Callprototype {
+            name,
+            return_arguments,
+            input_arguments
+        }
+    }
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-add
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-add
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#half-precision-floating-point-instructions-add
+InstAdd: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "add" <d:ArithDetails> <a:Arg3> => ast::Instruction::Add(d, a)
+};
+
+InstAddC: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "addc" <carry_out:".cc"?> <type_:IntType3264> <a:Arg3> => {
+        let details = ast::CarryInDetails {
+            carry_out: carry_out.is_some(),
+            type_
+        };
+        ast::Instruction::AddC(details, a)
+    }
+};
+
+InstAddCC: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "add" ".cc" <type_:IntType3264> <a:Arg3> => ast::Instruction::AddCC(type_, a)
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#comparison-and-selection-instructions-setp
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#half-precision-comparison-instructions-setp
+// TODO: support f16 setp
+InstSetp: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "setp" <d:SetpMode> <a:Arg4Setp> => ast::Instruction::Setp(d, a),
+    "setp" <d:SetpBoolMode> <dst1:ExtendedID> <dst2:OptionalDst?> "," <src1:Operand> "," <src2:Operand> "," <neg_src3:"!"?> <src3:Operand> => {
+        let args = ast::Arg5Setp{
+            dst1,
+            dst2,
+            src1,
+            src2,
+            src3
+        };
+        let mut details = d;
+        details.negate_src3 = neg_src3.is_some();
+        ast::Instruction::SetpBool(details, args)
+    }
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#half-precision-comparison-instructions-set
+InstSet: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "set" <cmp_op:SetpCompareOp> <ftz:".ftz"?> ".f16x2" ".f16x2" <arg:Arg3> => {
+        let data = ast::SetData {
+            dst_type: ast::ScalarType::F16x2,
+            src_type: ast::ScalarType::F16x2,
+            flush_to_zero: ftz.is_some(),
+        cmp_op: cmp_op,
+        };
+        ast::Instruction::Set(data, arg)
+    },
+    "set" <cmp_op:SetpCompareOp> <ftz:".ftz"?> ".u32" ".f16x2" <arg:Arg3> => {
+        let data = ast::SetData {
+            dst_type: ast::ScalarType::U32,
+            src_type: ast::ScalarType::F16x2,
+            flush_to_zero: ftz.is_some(),
+            cmp_op: cmp_op,
+        };
+        ast::Instruction::Set(data, arg)
+    }
+}
+
+SetpMode: ast::SetpData = {
+    <cmp_op:SetpCompareOp> <t:SetpTypeNoF32> => ast::SetpData {
+        typ: t,
+        flush_to_zero: None,
+        cmp_op: cmp_op,
+    },
+    <cmp_op:SetpCompareOp> <ftz:".ftz"?> ".f32" => ast::SetpData {
+        typ: ast::ScalarType::F32,
+        flush_to_zero: Some(ftz.is_some()),
+        cmp_op: cmp_op,
+    }
+
+};
+
+SetpBoolMode: ast::SetpBoolData = {
+    <cmp_op:SetpCompareOp> <bool_op:SetpBoolPostOp> <t:SetpTypeNoF32> => ast::SetpBoolData {
+        base: ast::SetpData {
+            typ: t,
+            flush_to_zero: None,
+            cmp_op: cmp_op,
+        },
+        bool_op: bool_op,
+        negate_src3: false,
+    },
+    <cmp_op:SetpCompareOp> <bool_op:SetpBoolPostOp> <ftz:".ftz"?> ".f32" => ast::SetpBoolData {
+        base: ast::SetpData {
+            typ: ast::ScalarType::F32,
+            flush_to_zero: Some(ftz.is_some()),
+            cmp_op: cmp_op,
+        },
+        bool_op: bool_op,
+        negate_src3: false,
+    }
+};
+
+SetpCompareOp: ast::SetpCompareOp = {
+    ".eq" => ast::SetpCompareOp::Eq,
+    ".ne" => ast::SetpCompareOp::NotEq,
+    ".lt" => ast::SetpCompareOp::Less,
+    ".le" => ast::SetpCompareOp::LessOrEq,
+    ".gt" => ast::SetpCompareOp::Greater,
+    ".ge" => ast::SetpCompareOp::GreaterOrEq,
+    ".lo" => ast::SetpCompareOp::Less,
+    ".ls" => ast::SetpCompareOp::LessOrEq,
+    ".hi" => ast::SetpCompareOp::Greater,
+    ".hs" => ast::SetpCompareOp::GreaterOrEq,
+    ".equ" => ast::SetpCompareOp::NanEq,
+    ".neu" => ast::SetpCompareOp::NanNotEq,
+    ".ltu" => ast::SetpCompareOp::NanLess,
+    ".leu" => ast::SetpCompareOp::NanLessOrEq,
+    ".gtu" => ast::SetpCompareOp::NanGreater,
+    ".geu" => ast::SetpCompareOp::NanGreaterOrEq,
+    ".num" => ast::SetpCompareOp::IsNotNan,
+    ".nan" => ast::SetpCompareOp::IsAnyNan,
+};
+
+SetpBoolPostOp: ast::SetpBoolPostOp = {
+    ".and" => ast::SetpBoolPostOp::And,
+    ".or" => ast::SetpBoolPostOp::Or,
+    ".xor" => ast::SetpBoolPostOp::Xor,
+};
+
+SetpTypeNoF32: ast::ScalarType = {
+    ".b16" => ast::ScalarType::B16,
+    ".b32" => ast::ScalarType::B32,
+    ".b64" => ast::ScalarType::B64,
+    ".u16" => ast::ScalarType::U16,
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+    // PTX docs lie, f16 is allowed
+    ".f16" => ast::ScalarType::F16,
+    ".f64" => ast::ScalarType::F64,
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#logic-and-shift-instructions-not
+InstNot: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "not" <t:BooleanType> <a:Arg2> => ast::Instruction::Not(t, a)
+};
+
+BooleanType: ast::ScalarType = {
+    ".pred" => ast::ScalarType::Pred,
+    ".b16" => ast::ScalarType::B16,
+    ".b32" => ast::ScalarType::B32,
+    ".b64" => ast::ScalarType::B64,
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#control-flow-instructions-at
+PredAt: ast::PredAt<&'input str> = {
+    "@" <label:ExtendedID> => ast::PredAt { not: false, label:label },
+    "@" "!" <label:ExtendedID> => ast::PredAt { not: true, label:label }
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#control-flow-instructions-bra
+InstBra: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "bra" <u:".uni"?> <a:Arg1> => ast::Instruction::Bra(ast::BraData{ uniform: u.is_some() }, a)
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cvt
+InstCvt: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "cvt" <s:".sat"?> <dst_t:CvtTypeInt> <src_t:CvtTypeInt> <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::new_int_from_int_checked(
+            s.is_some(),
+            dst_t,
+            src_t,
+            errors
+        ),
+        a)
+    },
+    "cvt" <r:RoundingModeFloat> <f:".ftz"?> <s:".sat"?> <dst_t:CvtTypeFloat> <src_t:CvtTypeInt> <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::new_float_from_int_checked(
+            r,
+            f.is_some(),
+            s.is_some(),
+            dst_t,
+            src_t,
+            errors
+        ),
+        a)
+    },
+    "cvt" <r:RoundingModeInt> <f:".ftz"?> <s:".sat"?> <dst_t:CvtTypeInt> <src_t:CvtTypeFloat> <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::new_int_from_float_checked(
+            r,
+            f.is_some(),
+            s.is_some(),
+            dst_t,
+            src_t,
+            errors
+        ),
+        a)
+    },
+    "cvt" <r:RoundingModeInt?> <s:".sat"?> ".f16" ".f16" <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::FloatFromFloat(
+            ast::CvtDesc {
+                rounding: r,
+                flush_to_zero: None,
+                saturate: s.is_some(),
+                dst: ast::ScalarType::F16,
+                src: ast::ScalarType::F16
+            }
+        ), a)
+    },
+    "cvt" <f:".ftz"?> <s:".sat"?> ".f32" ".f16" <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::FloatFromFloat(
+            ast::CvtDesc {
+                rounding: None,
+                flush_to_zero: Some(f.is_some()),
+                saturate: s.is_some(),
+                dst: ast::ScalarType::F32,
+                src: ast::ScalarType::F16
+            }
+        ), a)
+    },
+    "cvt" <f:".ftz"?> <s:".sat"?> ".f32" ".bf16" <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::FloatFromFloat(
+            ast::CvtDesc {
+                rounding: None,
+                flush_to_zero: Some(f.is_some()),
+                saturate: s.is_some(),
+                dst: ast::ScalarType::F32,
+                src: ast::ScalarType::BF16
+            }
+        ), a)
+    },
+    "cvt" <s:".sat"?> ".f64" ".f16" <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::FloatFromFloat(
+            ast::CvtDesc {
+                rounding: None,
+                flush_to_zero: None,
+                saturate: s.is_some(),
+                dst: ast::ScalarType::F64,
+                src: ast::ScalarType::F16
+            }
+        ), a)
+    },
+    "cvt" <r:RoundingModeFloat> <f:".ftz"?> <s:".sat"?> ".f16" ".f32" <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::FloatFromFloat(
+            ast::CvtDesc {
+                rounding: Some(r),
+                flush_to_zero: Some(f.is_some()),
+                saturate: s.is_some(),
+                dst: ast::ScalarType::F16,
+                src: ast::ScalarType::F32
+            }
+        ), a)
+    },
+    "cvt" <r:RoundingModeFloat> <f:".ftz"?> <s:".sat"?> ".bf16" ".f32" <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::FloatFromFloat(
+            ast::CvtDesc {
+                rounding: Some(r),
+                flush_to_zero: Some(f.is_some()),
+                saturate: s.is_some(),
+                dst: ast::ScalarType::BF16,
+                src: ast::ScalarType::F32
+            }
+        ), a)
+    },
+    "cvt" <r:RoundingModeInt?> <f:".ftz"?> <s:".sat"?> ".f32" ".f32" <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::FloatFromFloat(
+            ast::CvtDesc {
+                rounding: r,
+                flush_to_zero: Some(f.is_some()),
+                saturate: s.is_some(),
+                dst: ast::ScalarType::F32,
+                src: ast::ScalarType::F32
+            }
+        ), a)
+    },
+    "cvt" <s:".sat"?> <f:".ftz"?> ".f64" ".f32" <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::FloatFromFloat(
+            ast::CvtDesc {
+                rounding: None,
+                flush_to_zero: Some(f.is_some()),
+                saturate: s.is_some(),
+                dst: ast::ScalarType::F64,
+                src: ast::ScalarType::F32
+            }
+        ), a)
+    },
+    "cvt" <r:RoundingModeFloat> <s:".sat"?> ".f16" ".f64" <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::FloatFromFloat(
+            ast::CvtDesc {
+                rounding: Some(r),
+                flush_to_zero: None,
+                saturate: s.is_some(),
+                dst: ast::ScalarType::F16,
+                src: ast::ScalarType::F64
+            }
+        ), a)
+    },
+    "cvt" <r:RoundingModeFloat> <f:".ftz"?> <s:".sat"?> ".f32" ".f64" <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::FloatFromFloat(
+            ast::CvtDesc {
+                rounding: Some(r),
+                flush_to_zero: Some(s.is_some()),
+                saturate: s.is_some(),
+                dst: ast::ScalarType::F32,
+                src: ast::ScalarType::F64
+            }
+        ), a)
+    },
+    "cvt" <r:RoundingModeInt?> <s:".sat"?> ".f64" ".f64" <a:Arg2> => {
+        ast::Instruction::Cvt(ast::CvtDetails::FloatFromFloat(
+            ast::CvtDesc {
+                rounding: r,
+                flush_to_zero: None,
+                saturate: s.is_some(),
+                dst: ast::ScalarType::F64,
+                src: ast::ScalarType::F64
+            }
+        ), a)
+    }
+};
+
+CvtTypeInt: ast::ScalarType = {
+    ".u8" => ast::ScalarType::U8,
+    ".u16" => ast::ScalarType::U16,
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+    ".s8" => ast::ScalarType::S8,
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+};
+
+CvtTypeFloat: ast::ScalarType = {
+    ".bf16" => ast::ScalarType::BF16,
+    ".f16" => ast::ScalarType::F16,
+    ".f32" => ast::ScalarType::F32,
+    ".f64" => ast::ScalarType::F64,
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#logic-and-shift-instructions-shl
+InstShl: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "shl" <t:ShlType> <a:Arg3> => ast::Instruction::Shl(t, a)
+};
+
+ShlType: ast::ScalarType = {
+    ".b16" => ast::ScalarType::B16,
+    ".b32" => ast::ScalarType::B32,
+    ".b64" => ast::ScalarType::B64,
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#logic-and-shift-instructions-shr
+InstShr: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "shr" <t:ShrType> <a:Arg3> => ast::Instruction::Shr(t, a)
+};
+
+ShrType: ast::ScalarType = {
+    ".b16" => ast::ScalarType::B16,
+    ".b32" => ast::ScalarType::B32,
+    ".b64" => ast::ScalarType::B64,
+    ".u16" => ast::ScalarType::U16,
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-st
+// Warning: NVIDIA documentation is incorrect, you can specify scope only once
+InstSt: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "st" <q:LdStQualifier?> <ss:StStateSpace?> <cop:StCacheOperator?> <t:LdStType> <src1:MemoryOperand> "," <src2:SrcOperandVec> => {
+        ast::Instruction::St(
+            ast::StData {
+                qualifier: q.unwrap_or(ast::LdStQualifier::Weak),
+                state_space: ss.unwrap_or(ast::StateSpace::Generic),
+                caching: cop.unwrap_or(ast::StCacheOperator::Writeback),
+                typ: t
+            },
+            ast::Arg2St { src1:src1, src2:src2 }
+        )
+    },
+    // Wrong order, used by QUDA
+    "st" <caching:StCacheOperator> <state_space:StStateSpace> <t:LdStType> <src1:MemoryOperand> "," <src2:SrcOperandVec> => {
+        ast::Instruction::St(
+            ast::StData {
+                qualifier: ast::LdStQualifier::Weak,
+                state_space,
+                caching,
+                typ: t
+            },
+            ast::Arg2St { src1:src1, src2:src2 }
+        )
+    }
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#using-addresses-arrays-and-vectors
+MemoryOperand: ast::Operand<&'input str> = {
+    "[" <o:Operand> "]" => o
+}
+
+StStateSpace: ast::StateSpace = {
+    ".global" => ast::StateSpace::Global,
+    ".local" => ast::StateSpace::Local,
+    ".param" => ast::StateSpace::Param,
+    ".shared" => ast::StateSpace::Shared,
+};
+
+StCacheOperator: ast::StCacheOperator = {
+    ".wb" => ast::StCacheOperator::Writeback,
+    ".cg" => ast::StCacheOperator::L2Only,
+    ".cs" => ast::StCacheOperator::Streaming,
+    ".wt" => ast::StCacheOperator::Writethrough,
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#control-flow-instructions-ret
+InstRet: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "ret" <u:".uni"?> => ast::Instruction::Ret(ast::RetData { uniform: u.is_some() })
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cvta
+InstCvta: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "cvta" <from:CvtaStateSpace> <s:CvtaSize> <a:Arg2> => {
+        ast::Instruction::Cvta(ast::CvtaDetails {
+            to: ast::StateSpace::Generic,
+            from,
+            size: s
+        },
+        a)
+    },
+    "cvta" ".to" <to:CvtaStateSpace> <s:CvtaSize> <a:Arg2> => {
+        ast::Instruction::Cvta(ast::CvtaDetails {
+            to,
+            from: ast::StateSpace::Generic,
+            size: s
+        },
+        a)
+    }
+}
+
+CvtaStateSpace: ast::StateSpace = {
+    ".const" => ast::StateSpace::Const,
+    ".global" => ast::StateSpace::Global,
+    ".local" => ast::StateSpace::Local,
+    ".shared" => ast::StateSpace::Shared,
+}
+
+CvtaSize: ast::CvtaSize = {
+    ".u32" => ast::CvtaSize::U32,
+    ".u64" => ast::CvtaSize::U64,
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#control-flow-instructions-call
+InstCall: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "call" <u:".uni"?> <args:ArgCall> => {
+        let (ret_params, func, param_list, prototype) = args;
+        ast::Instruction::Call(ast::CallInst { uniform: u.is_some(), ret_params, func, param_list, prototype })
+    }
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-abs
+InstAbs: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "abs" <t:SignedIntType> <a:Arg2> => {
+        ast::Instruction::Abs(ast::AbsDetails { flush_to_zero: None, typ: t }, a)
+    },
+    "abs" <f:".ftz"?> ".f32" <a:Arg2> => {
+        ast::Instruction::Abs(ast::AbsDetails { flush_to_zero: Some(f.is_some()), typ: ast::ScalarType::F32 }, a)
+    },
+    "abs" ".f64" <a:Arg2> => {
+        ast::Instruction::Abs(ast::AbsDetails { flush_to_zero: None, typ: ast::ScalarType::F64 }, a)
+    },
+    "abs" <f:".ftz"?> ".f16" <a:Arg2> => {
+        ast::Instruction::Abs(ast::AbsDetails { flush_to_zero: Some(f.is_some()), typ: ast::ScalarType::F16 }, a)
+    },
+    "abs" <f:".ftz"?> ".f16x2" <a:Arg2> => {
+        ast::Instruction::Abs(ast::AbsDetails { flush_to_zero: Some(f.is_some()), typ: ast::ScalarType::F16x2 }, a)
+    },
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-mad
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-mad
+InstMad: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "mad" <d:MulDetails> <a:Arg4> => ast::Instruction::Mad(d, a),
+    "mad" ".hi" ".sat" ".s32" => todo!(),
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#extended-precision-arithmetic-instructions-mad-cc
+InstMadCC: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "mad" ".lo" ".cc" <type_:IntType3264> <arg:Arg4> => {
+        ast::Instruction::MadCC { type_, arg, is_hi: false }
+    },
+    "mad" ".hi" ".cc" <type_:IntType3264> <arg:Arg4> => {
+        ast::Instruction::MadCC { type_, arg, is_hi: true }
+    },
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#extended-precision-arithmetic-instructions-madc
+InstMadC: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "madc" ".lo" <carry_out:".cc"?> <type_:IntType3264> <arg:Arg4> => {
+        ast::Instruction::MadC { type_, arg, is_hi: false, carry_out: carry_out.is_some() }
+    },
+    "madc" ".hi" <carry_out:".cc"?> <type_:IntType3264> <arg:Arg4> => {
+        ast::Instruction::MadC { type_, arg, is_hi: true, carry_out: carry_out.is_some() }
+    },
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-fma
+InstFma: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "fma" <f:ArithFloatMustRound> <a:Arg4> => ast::Instruction::Fma(f, a),
+};
+
+SignedIntType: ast::ScalarType = {
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#logic-and-shift-instructions-or
+InstOr: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "or" <d:BooleanType> <a:Arg3> => ast::Instruction::Or(d, a),
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#logic-and-shift-instructions-and
+InstAnd: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "and" <d:BooleanType> <a:Arg3> => ast::Instruction::And(d, a),
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-rcp
+InstRcp: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "rcp" ".approx" <ftz:".ftz"?> ".f32" <a:Arg2> => {
+        let details = ast::RcpSqrtDetails {
+            kind: ast::RcpSqrtKind::Approx,
+            flush_to_zero: Some(ftz.is_some()),
+            type_: ast::ScalarType::F32,
+        };
+        ast::Instruction::Rcp(details, a)
+    },
+    // PyTorch
+    "rcp" ".approx" ".f32" ".ftz" <a:Arg2> => {
+        let details = ast::RcpSqrtDetails {
+            kind: ast::RcpSqrtKind::Approx,
+            flush_to_zero: Some(true),
+            type_: ast::ScalarType::F32,
+        };
+        ast::Instruction::Rcp(details, a)
+    },
+    // Undocumented, but supported. Used in some Thrust code from waifu2x
+    "rcp" ".approx" <ftz:".ftz"?> ".f64" <a:Arg2> => {
+        let details = ast::RcpSqrtDetails {
+            kind: ast::RcpSqrtKind::Approx,
+            flush_to_zero: Some(ftz.is_some()),
+            type_: ast::ScalarType::F64,
+        };
+        ast::Instruction::Rcp(details, a)
+    },
+    "rcp" <kind:RcpSqrtRounding> <ftz:".ftz"?> ".f32" <a:Arg2> => {
+        let details = ast::RcpSqrtDetails {
+            kind,
+            flush_to_zero: Some(ftz.is_some()),
+            type_: ast::ScalarType::F32,
+        };
+        ast::Instruction::Rcp(details, a)
+    },
+    "rcp" <kind:RcpSqrtRounding> ".f64" <a:Arg2> => {
+        let details = ast::RcpSqrtDetails {
+            kind,
+            flush_to_zero: None,
+            type_: ast::ScalarType::F64,
+        };
+        ast::Instruction::Rcp(details, a)
+    }
+};
+
+RcpSqrtRounding: ast::RcpSqrtKind = {
+    <r:RoundingModeFloat> => ast::RcpSqrtKind::Rounding(r)
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-sub
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-sub
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#half-precision-floating-point-instructions-sub
+InstSub: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "sub" <d:ArithDetails> <a:Arg3> => ast::Instruction::Sub(d, a),
+};
+
+InstSubC: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "subc" <carry_out:".cc"?> <type_:IntType3264> <a:Arg3> => {
+        let details = ast::CarryInDetails {
+            carry_out: carry_out.is_some(),
+            type_
+        };
+        ast::Instruction::SubC(details, a)
+    }
+};
+
+InstSubCC: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "sub" ".cc" <type_:IntType3264> <a:Arg3> => ast::Instruction::SubCC(type_, a)
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-min
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-min
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#half-precision-floating-point-instructions-min
+InstMin: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "min" <d:MinMaxDetails> <a:Arg3> => ast::Instruction::Min(d, a),
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-max
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-max
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#half-precision-floating-point-instructions-max
+InstMax: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "max" <d:MinMaxDetails> <a:Arg3> => ast::Instruction::Max(d, a),
+};
+
+MinMaxDetails: ast::MinMaxDetails = {
+    <t:UIntType> => ast::MinMaxDetails::Unsigned(t),
+    <t:SIntType> => ast::MinMaxDetails::Signed(t),
+    <ftz:".ftz"?> <nan:".NaN"?> ".f32" => ast::MinMaxDetails::Float(
+        ast::MinMaxFloat{ flush_to_zero: Some(ftz.is_some()), nan: nan.is_some(), typ: ast::ScalarType::F32 }
+    ),
+    ".f64" => ast::MinMaxDetails::Float(
+        ast::MinMaxFloat{ flush_to_zero: None, nan: false, typ: ast::ScalarType::F64 }
+    ),
+    <ftz:".ftz"?> <nan:".NaN"?> ".f16" => ast::MinMaxDetails::Float(
+        ast::MinMaxFloat{ flush_to_zero: Some(ftz.is_some()), nan: nan.is_some(), typ: ast::ScalarType::F16 }
+    ),
+    <ftz:".ftz"?> <nan:".NaN"?> ".bf16" => ast::MinMaxDetails::Float(
+        ast::MinMaxFloat{ flush_to_zero: Some(ftz.is_some()), nan: nan.is_some(), typ: ast::ScalarType::BF16 }
+    ),
+    <ftz:".ftz"?> <nan:".NaN"?> ".f16x2" => ast::MinMaxDetails::Float(
+        ast::MinMaxFloat{ flush_to_zero: Some(ftz.is_some()), nan: nan.is_some(), typ: ast::ScalarType::F16x2 }
+    )
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#comparison-and-selection-instructions-selp
+InstSelp: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "selp" <t:SelpType> <a:Arg4> => ast::Instruction::Selp(t, a),
+};
+
+SelpType: ast::ScalarType = {
+    ".b16" => ast::ScalarType::B16,
+    ".b32" => ast::ScalarType::B32,
+    ".b64" => ast::ScalarType::B64,
+    ".u16" => ast::ScalarType::U16,
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+    ".f32" => ast::ScalarType::F32,
+    ".f64" => ast::ScalarType::F64,
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-bar
+InstBar: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "bar" ".sync" <a:Arg1Bar> => ast::Instruction::Bar(ast::BarDetails::SyncAligned, a),
+    "bar" ".warp" ".sync" <a:Arg1Bar> => ast::Instruction::BarWarp(ast::BarDetails::SyncAligned, a),
+    "barrier" ".sync" <a:Arg1Bar> => ast::Instruction::Bar(ast::BarDetails::SyncAligned, a),
+    "barrier" ".sync" ".aligned" <a:Arg1Bar> => ast::Instruction::Bar(ast::BarDetails::SyncAligned, a),
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-bar
+InstBarRed: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "bar" ".red" ".and" ".pred" <a:Arg3> =>  {
+        let reduction = ast::ReductionOp::And;
+        ast::Instruction::BarRed(reduction, a)
+    },
+    "bar" ".red" ".or"  ".pred" <a:Arg3> => {
+        let reduction = ast::ReductionOp::Or;
+        ast::Instruction::BarRed(reduction, a)
+    },
+    "bar" ".red" ".popc"  ".u32" <a:Arg3> => {
+        let reduction = ast::ReductionOp::Popc;
+        ast::Instruction::BarRed(reduction, a)
+    },
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-atom
+// The documentation does not mention all spported operations:
+// * Operation .add requires .u32 or .s32 or .u64 or .f64 or f16 or f16x2 or .f32
+// * Operation .inc requires .u32 type for instuction
+// * Operation .dec requires .u32 type for instuction
+// Otherwise as documented
+InstAtom: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "atom" <sema:AtomSemantics?> <scope:MemScope?> <space:AtomSpace?> <op:AtomBitOp> <typ:BitType> <a:Arg3Atom> => {
+        let details = ast::AtomDetails {
+            semantics: sema.unwrap_or(ast::AtomSemantics::Relaxed),
+            scope: scope.unwrap_or(ast::MemScope::Gpu),
+            space: space.unwrap_or(ast::StateSpace::Generic),
+            inner: ast::AtomInnerDetails::Bit { op, typ }
+        };
+        ast::Instruction::Atom(details,a)
+    },
+    // Wrong order, used by QUDA
+    "atom" <op:AtomBitOp> <scope:MemScope> <typ:BitType> <a:Arg3Atom> => {
+        let details = ast::AtomDetails {
+            semantics: ast::AtomSemantics::Relaxed,
+            scope,
+            space: ast::StateSpace::Generic,
+            inner: ast::AtomInnerDetails::Bit { op, typ }
+        };
+        ast::Instruction::Atom(details,a)
+    },
+    // Wrong order, used by QUDA
+    "atom" <op: AtomUIntOp> <scope:MemScope>  <typ:UIntType3264> <a:Arg3Atom> => {
+        let details = ast::AtomDetails {
+            semantics: ast::AtomSemantics::Relaxed,
+            scope,
+            space: ast::StateSpace::Generic,
+            inner: ast::AtomInnerDetails::Unsigned { op, typ }
+        };
+        ast::Instruction::Atom(details,a)
+    },
+    "atom" <sema:AtomSemantics?> <scope:MemScope?> <space:AtomSpace?> ".inc" ".u32" <a:Arg3Atom> => {
+        let details = ast::AtomDetails {
+            semantics: sema.unwrap_or(ast::AtomSemantics::Relaxed),
+            scope: scope.unwrap_or(ast::MemScope::Gpu),
+            space: space.unwrap_or(ast::StateSpace::Generic),
+            inner: ast::AtomInnerDetails::Unsigned {
+                op: ast::AtomUIntOp::Inc,
+                typ: ast::ScalarType::U32
+            }
+        };
+        ast::Instruction::Atom(details,a)
+    },
+    "atom" <sema:AtomSemantics?> <scope:MemScope?> <space:AtomSpace?> ".dec" ".u32" <a:Arg3Atom> => {
+        let details = ast::AtomDetails {
+            semantics: sema.unwrap_or(ast::AtomSemantics::Relaxed),
+            scope: scope.unwrap_or(ast::MemScope::Gpu),
+            space: space.unwrap_or(ast::StateSpace::Generic),
+            inner: ast::AtomInnerDetails::Unsigned {
+                op: ast::AtomUIntOp::Dec,
+                typ: ast::ScalarType::U32
+            }
+        };
+        ast::Instruction::Atom(details,a)
+    },
+    "atom" <sema:AtomSemantics?> <scope:MemScope?> <space:AtomSpace?> ".add" <typ:FloatType> <a:Arg3Atom> => {
+        let op = ast::AtomFloatOp::Add;
+        let details = ast::AtomDetails {
+            semantics: sema.unwrap_or(ast::AtomSemantics::Relaxed),
+            scope: scope.unwrap_or(ast::MemScope::Gpu),
+            space: space.unwrap_or(ast::StateSpace::Generic),
+            inner: ast::AtomInnerDetails::Float { op, typ }
+        };
+        ast::Instruction::Atom(details,a)
+    },
+    // TODO: propagate .noftz
+    "atom" <sema:AtomSemantics?> <scope:MemScope?> <space:AtomSpace?> ".add" ".noftz" ".f16" <a:Arg3Atom> => {
+        let op = ast::AtomFloatOp::Add;
+        let typ = ast::ScalarType::F16;
+        let details = ast::AtomDetails {
+            semantics: sema.unwrap_or(ast::AtomSemantics::Relaxed),
+            scope: scope.unwrap_or(ast::MemScope::Gpu),
+            space: space.unwrap_or(ast::StateSpace::Generic),
+            inner: ast::AtomInnerDetails::Float { op, typ }
+        };
+        ast::Instruction::Atom(details,a)
+    },
+    "atom" <sema:AtomSemantics?> <scope:MemScope?> <space:AtomSpace?> <op: AtomUIntOp> <typ:UIntType3264> <a:Arg3Atom> => {
+        let details = ast::AtomDetails {
+            semantics: sema.unwrap_or(ast::AtomSemantics::Relaxed),
+            scope: scope.unwrap_or(ast::MemScope::Gpu),
+            space: space.unwrap_or(ast::StateSpace::Generic),
+            inner: ast::AtomInnerDetails::Unsigned { op, typ }
+        };
+        ast::Instruction::Atom(details,a)
+    },
+    // Wrong order, used by PETSc
+    "atom" <op: AtomUIntOp> <semantics:AtomSemantics> <scope:MemScope> <space:AtomSpace?> <typ:UIntType3264> <a:Arg3Atom> => {
+        let details = ast::AtomDetails {
+            semantics,
+            scope,
+            space: space.unwrap_or(ast::StateSpace::Generic),
+            inner: ast::AtomInnerDetails::Unsigned { op, typ }
+        };
+        ast::Instruction::Atom(details,a)
+    },
+    "atom" <sema:AtomSemantics?> <scope:MemScope?> <space:AtomSpace?> <op: AtomSIntOp> <typ:SIntType3264> <a:Arg3Atom> => {
+        let details = ast::AtomDetails {
+            semantics: sema.unwrap_or(ast::AtomSemantics::Relaxed),
+            scope: scope.unwrap_or(ast::MemScope::Gpu),
+            space: space.unwrap_or(ast::StateSpace::Generic),
+            inner: ast::AtomInnerDetails::Signed { op, typ }
+        };
+        ast::Instruction::Atom(details,a)
+    }
+}
+
+InstAtomCas: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "atom" <sema:AtomSemantics?> <scope:MemScope?> <space:AtomSpace?> ".cas" <typ:BitType> <a:Arg4Atom> => {
+        let details = ast::AtomCasDetails {
+            semantics: sema.unwrap_or(ast::AtomSemantics::Relaxed),
+            scope: scope.unwrap_or(ast::MemScope::Gpu),
+            space: space.unwrap_or(ast::StateSpace::Generic),
+            typ,
+        };
+        ast::Instruction::AtomCas(details,a)
+    },
+}
+
+AtomSemantics: ast::AtomSemantics = {
+    ".relaxed" => ast::AtomSemantics::Relaxed,
+    ".acquire" => ast::AtomSemantics::Acquire,
+    ".release" => ast::AtomSemantics::Release,
+    ".acq_rel" => ast::AtomSemantics::AcquireRelease
+}
+
+AtomSpace: ast::StateSpace = {
+    ".global" => ast::StateSpace::Global,
+    ".shared" => ast::StateSpace::Shared
+}
+
+AtomBitOp: ast::AtomBitOp = {
+    ".and" => ast::AtomBitOp::And,
+    ".or" => ast::AtomBitOp::Or,
+    ".xor" => ast::AtomBitOp::Xor,
+    ".exch" => ast::AtomBitOp::Exchange,
+}
+
+AtomUIntOp: ast::AtomUIntOp = {
+    ".add" => ast::AtomUIntOp::Add,
+    ".min" => ast::AtomUIntOp::Min,
+    ".max" => ast::AtomUIntOp::Max,
+}
+
+AtomSIntOp: ast::AtomSIntOp = {
+    ".add" => ast::AtomSIntOp::Add,
+    ".min" => ast::AtomSIntOp::Min,
+    ".max" => ast::AtomSIntOp::Max,
+}
+
+BitType: ast::ScalarType = {
+    ".b32" => ast::ScalarType::B32,
+    ".b64" => ast::ScalarType::B64,
+}
+
+UIntType3264: ast::ScalarType = {
+    ".u32" => ast::ScalarType::U32,
+    ".u64" => ast::ScalarType::U64,
+}
+
+SIntType3264: ast::ScalarType = {
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-div
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-div
+InstDiv: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "div" <t:UIntType> <a:Arg3> => ast::Instruction::Div(ast::DivDetails::Unsigned(t), a),
+    "div" <t:SIntType> <a:Arg3> => ast::Instruction::Div(ast::DivDetails::Signed(t), a),
+    "div" <kind:DivFloatKind> <ftz:".ftz"?> ".f32" <a:Arg3> => {
+        let inner = ast::DivFloatDetails {
+            typ: ast::ScalarType::F32,
+            flush_to_zero: Some(ftz.is_some()),
+            kind
+        };
+        ast::Instruction::Div(ast::DivDetails::Float(inner), a)
+    },
+    "div" <rnd:RoundingModeFloat> ".f64" <a:Arg3> => {
+        let inner = ast::DivFloatDetails {
+            typ: ast::ScalarType::F64,
+            flush_to_zero: None,
+            kind: ast::DivFloatKind::Rounding(rnd)
+        };
+        ast::Instruction::Div(ast::DivDetails::Float(inner), a)
+    },
+}
+
+DivFloatKind: ast::DivFloatKind = {
+    ".approx" => ast::DivFloatKind::Approx,
+    ".full" => ast::DivFloatKind::Full,
+    <rnd:RoundingModeFloat> => ast::DivFloatKind::Rounding(rnd),
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-sqrt
+InstSqrt: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "sqrt" ".approx" <ftz:".ftz"?> ".f32" <a:Arg2> => {
+        let details = ast::RcpSqrtDetails {
+            kind: ast::RcpSqrtKind::Approx,
+            flush_to_zero: Some(ftz.is_some()),
+            type_: ast::ScalarType::F32,
+        };
+        ast::Instruction::Sqrt(details, a)
+    },
+    "sqrt" <kind:RcpSqrtRounding> <ftz:".ftz"?> ".f32" <a:Arg2> => {
+        let details = ast::RcpSqrtDetails {
+            kind,
+            flush_to_zero: Some(ftz.is_some()),
+            type_: ast::ScalarType::F32,
+        };
+        ast::Instruction::Sqrt(details, a)
+    },
+    "sqrt" <kind:RcpSqrtRounding> ".f64" <a:Arg2> => {
+        let details = ast::RcpSqrtDetails {
+            kind,
+            flush_to_zero: None,
+            type_: ast::ScalarType::F64,
+        };
+        ast::Instruction::Sqrt(details, a)
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-rsqrt
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-rsqrt-approx-ftz-f64
+InstRsqrt: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "rsqrt" ".approx" <ftz:".ftz"?> ".f32" <a:Arg2> => {
+        let details = ast::RsqrtDetails {
+            typ: ast::ScalarType::F32,
+            flush_to_zero: ftz.is_some(),
+        };
+        ast::Instruction::Rsqrt(details, a)
+    },
+    // PyTorch
+    "rsqrt" ".approx" ".f32" ".ftz" <a:Arg2> => {
+        let details = ast::RsqrtDetails {
+            typ: ast::ScalarType::F32,
+            flush_to_zero: true,
+        };
+        ast::Instruction::Rsqrt(details, a)
+    },
+    "rsqrt" ".approx" <ftz:".ftz"?> ".f64" <a:Arg2> => {
+        let details = ast::RsqrtDetails {
+            typ: ast::ScalarType::F64,
+            flush_to_zero: ftz.is_some(),
+        };
+        ast::Instruction::Rsqrt(details, a)
+    },
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-neg
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-neg
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#half-precision-floating-point-instructions-neg
+InstNeg: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "neg" <ftz:".ftz"?> <typ:NegTypeFtz> <a:Arg2> => {
+        let details = ast::NegDetails {
+            typ,
+            flush_to_zero: Some(ftz.is_some()),
+        };
+        ast::Instruction::Neg(details, a)
+    },
+    "neg" <typ:NegTypeNonFtz> <a:Arg2> => {
+        let details = ast::NegDetails {
+            typ,
+            flush_to_zero: None,
+        };
+        ast::Instruction::Neg(details, a)
+    },
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-sin
+InstSin: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "sin" ".approx" <ftz:".ftz"?> ".f32" <arg:Arg2> => {
+        ast::Instruction::Sin{ flush_to_zero: ftz.is_some(), arg }
+    },
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-cos
+InstCos: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "cos" ".approx" <ftz:".ftz"?> ".f32" <arg:Arg2> => {
+        ast::Instruction::Cos{ flush_to_zero: ftz.is_some(), arg }
+    },
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-lg2
+InstLg2: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "lg2" ".approx" <ftz:".ftz"?> ".f32" <arg:Arg2> => {
+        ast::Instruction::Lg2{ flush_to_zero: ftz.is_some(), arg }
+    },
+    // PyTorch
+    "lg2" ".approx" ".f32" ".ftz" <arg:Arg2> => {
+        ast::Instruction::Lg2{ flush_to_zero: true, arg }
+    },
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-ex2
+InstEx2: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "ex2" ".approx" <ftz:".ftz"?> ".f32" <arg:Arg2> => {
+        ast::Instruction::Ex2{ flush_to_zero: ftz.is_some(), arg }
+    },
+    // PyTorch
+    "ex2" ".approx" ".f32" ".ftz" <arg:Arg2> => {
+        ast::Instruction::Ex2{ flush_to_zero: true, arg }
+    },
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-clz
+InstClz: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "clz" <typ:BitType> <arg:Arg2> => ast::Instruction::Clz{ <> }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-brev
+InstBrev: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "brev" <typ:BitType> <arg:Arg2> => ast::Instruction::Brev{ <> }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-popc
+InstPopc: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "popc" <typ:BitType> <arg:Arg2> => ast::Instruction::Popc{ <> }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#logic-and-shift-instructions-xor
+InstXor: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "xor" <typ:BooleanType> <arg:Arg3> => ast::Instruction::Xor{ <> }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-bfe
+InstBfe: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "bfe" <typ:IntType3264> <arg:Arg4> => ast::Instruction::Bfe{ <> }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-bfi
+InstBfi: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "bfi" <typ:BitType> <arg:Arg5> => ast::Instruction::Bfi{ <> }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-prmt
+InstPrmt: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "prmt" ".b32" <arg:Arg3> "," <control:U16Num> => ast::Instruction::Prmt{ <> },
+    "prmt" ".b32" <arg:Arg3> "," <control:ExtendedID> => ast::Instruction::PrmtSlow{ <> }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-rem
+InstRem: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "rem" <typ:IntType> <arg:Arg3> => ast::Instruction::Rem{ <> }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-activemask
+InstActivemask: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "activemask" ".b32" <arg:Arg1> => ast::Instruction::Activemask{ <> }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-membar
+InstMembar: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "membar" <level:MembarLevel> => ast::Instruction::Membar{ <> }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#texture-instructions-tex
+InstTex: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "tex" <geometry: UnlayeredTextureGeometry> ".v4" <channel_type:TextureChannelType> <coordinate_type:TextureCoordinateType> <dst:DstOperandVec> "," "[" <image:Operand> "," <coordinates:SrcOperandVec> "]" => {
+        let args = ast::Arg5Tex {
+            dst,
+            image,
+            coordinates,
+            layer: None,
+            lod: None
+        };
+        let details = ast::TexDetails { geometry, channel_type, coordinate_type, direct: false };
+        ast::Instruction::Tex(details, args)
+    },
+    "tex" ".level" <geometry: UnlayeredTextureGeometry> ".v4" <channel_type:TextureChannelType> <coordinate_type:TextureCoordinateType> <dst:DstOperandVec> "," "[" <image:Operand> "," <coordinates:SrcOperandVec> "]" "," <lod:Operand> => {
+        let args = ast::Arg5Tex {
+            dst,
+            image,
+            coordinates,
+            layer: None,
+            lod: Some(lod)
+        };
+        let details = ast::TexDetails { geometry, channel_type, coordinate_type, direct: false };
+        ast::Instruction::Tex(details, args)
+    },
+    // We give a1d and a2d image operations distinctive treatment, because its
+    // coordintate argument is a fake vector. If you try to pass a vector to
+    // a1d/a2d image instructions on NVIDIA's compiler, it ICEs
+    "tex" ".a1d" ".v4" <channel_type:TextureChannelType> <coordinate_type:TextureCoordinateType>
+        <dst:DstOperandVec> "," "[" <image:SrcOperand> "," "{" <layer:SrcOperand> "," <x:RegOrImmediate> "}" "]" => {
+        let geometry = ast::TextureGeometry::Array1D;
+        let args = ast::Arg5Tex {
+            dst,
+            image,
+            coordinates: ast::Operand::VecPack(vec![x]),
+            layer: Some(layer),
+            lod: None
+        };
+        let details = ast::TexDetails { geometry, channel_type, coordinate_type, direct: false };
+        ast::Instruction::Tex(details, args)
+    },
+    "tex" ".level" ".a1d" ".v4" <channel_type:TextureChannelType> <coordinate_type:TextureCoordinateType>
+        <dst:DstOperandVec> "," "[" <image:SrcOperand> "," "{" <layer:SrcOperand> "," <x:RegOrImmediate> "}" "]" "," <lod:Operand> => {
+        let geometry = ast::TextureGeometry::Array1D;
+        let args = ast::Arg5Tex {
+            dst,
+            image,
+            coordinates: ast::Operand::VecPack(vec![x]),
+            layer: Some(layer),
+            lod: Some(lod)
+        };
+        let details = ast::TexDetails { geometry, channel_type, coordinate_type, direct: false };
+        ast::Instruction::Tex(details, args)
+    },
+    "tex" ".a2d" ".v4" <channel_type:TextureChannelType> <coordinate_type:TextureCoordinateType>
+        <dst:DstOperandVec> "," "[" <image:SrcOperand> "," "{" <layer:SrcOperand> "," <x:RegOrImmediate> "," <y:RegOrImmediate> "," RegOrImmediate "}" "]" => {
+        let geometry = ast::TextureGeometry::Array2D;
+        let args = ast::Arg5Tex {
+            dst,
+            image,
+            coordinates: ast::Operand::VecPack(vec![x, y]),
+            layer: Some(layer),
+            lod: None
+        };
+        let details = ast::TexDetails { geometry, channel_type, coordinate_type, direct: false };
+        ast::Instruction::Tex(details, args)
+    },
+    "tex" ".level" ".a2d" ".v4" <channel_type:TextureChannelType> <coordinate_type:TextureCoordinateType>
+        <dst:DstOperandVec> "," "[" <image:SrcOperand> "," "{" <layer:SrcOperand> "," <x:RegOrImmediate> "," <y:RegOrImmediate> "," RegOrImmediate "}" "]" "," <lod:Operand>  => {
+        let geometry = ast::TextureGeometry::Array2D;
+        let args = ast::Arg5Tex {
+            dst,
+            image,
+            coordinates: ast::Operand::VecPack(vec![x, y]),
+            layer: Some(layer),
+            lod: Some(lod)
+        };
+        let details = ast::TexDetails { geometry, channel_type, coordinate_type, direct: false };
+        ast::Instruction::Tex(details, args)
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#surface-instructions-suld
+InstSuld: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "suld" ".b" <geometry: UnlayeredTextureGeometry> <vector:VectorPrefix?> <type_:AnyBitType> ".trap" <dst:DstOperandVec> "," "[" <image:Operand> "," <coordinates:SrcOperandVec> "]"  => {
+        let args = ast::Arg5Tex {
+            dst, 
+            image,
+            coordinates,
+            layer: None,
+            lod: None,
+        };
+        let details = ast::SurfaceDetails { geometry, vector, type_, direct: false, };
+        ast::Instruction::Suld(details, args)
+    },
+    "suld" ".b" ".a1d" <vector:VectorPrefix?> <type_:AnyBitType> ".trap" <dst:DstOperandVec> "," "[" <image:Operand> "," "{" <layer:SrcOperand> "," <x:RegOrImmediate> "}" "]"  => {
+        let geometry = ast::TextureGeometry::Array1D;
+        let args = ast::Arg5Tex {
+            dst,
+            image,
+            coordinates: ast::Operand::VecPack(vec![x]),
+            layer: Some(layer),
+            lod: None,
+        };
+        let details = ast::SurfaceDetails { geometry, vector, type_, direct: false, };
+        ast::Instruction::Suld(details, args)
+    },
+    "suld" ".b" ".a2d" <vector:VectorPrefix?> <type_:AnyBitType> ".trap" <dst:DstOperandVec> "," "[" <image:Operand> "," "{" <layer:SrcOperand> "," <x:RegOrImmediate> "," <y:RegOrImmediate> "," RegOrImmediate "}" "]"  => {
+        let geometry = ast::TextureGeometry::Array2D;
+        let args = ast::Arg5Tex {
+            dst,
+            image,
+            coordinates: ast::Operand::VecPack(vec![x, y]),
+            layer: Some(layer),
+            lod: None,
+        };
+        let details = ast::SurfaceDetails { geometry, vector, type_, direct: false, };
+        ast::Instruction::Suld(details, args)
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#surface-instructions-sust
+InstSust: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "sust" ".b" <geometry: UnlayeredTextureGeometry> <vector:VectorPrefix?> <type_:AnyBitType> SustClamp "[" <image:Operand> "," <coordinates:SrcOperandVec> "]" "," <value:SrcOperandVec> => {
+        let args = ast::Arg4Sust {
+            image,
+            coordinates,
+            layer: None,
+            value,
+        };
+        let details = ast::SurfaceDetails { geometry, vector, type_, direct: false, };
+        ast::Instruction::Sust(details, args)
+    },
+    "sust" ".b" ".a1d" <vector:VectorPrefix?> <type_:AnyBitType> SustClamp "[" <image:Operand> "," "{" <layer:SrcOperand> "," <x:RegOrImmediate> "}" "]" "," <value:SrcOperandVec> => {
+        let geometry = ast::TextureGeometry::Array1D;
+        let args = ast::Arg4Sust {
+            image,
+            coordinates: ast::Operand::VecPack(vec![x]),
+            layer: Some(layer),
+            value,
+        };
+        let details = ast::SurfaceDetails { geometry, vector, type_, direct: false, };
+        ast::Instruction::Sust(details, args)
+    },
+    "sust" ".b" ".a2d" <vector:VectorPrefix?> <type_:AnyBitType> SustClamp "[" <image:Operand> "," "{" <layer:SrcOperand> "," <x:RegOrImmediate> "," <y:RegOrImmediate> "," RegOrImmediate "}" "]" "," <value:SrcOperandVec> => {
+        let geometry = ast::TextureGeometry::Array2D;
+        let args = ast::Arg4Sust {
+            image,
+            coordinates: ast::Operand::VecPack(vec![x, y]),
+            layer: Some(layer),
+            value,
+        };
+        let details = ast::SurfaceDetails { geometry, vector, type_, direct: false, };
+        ast::Instruction::Sust(details, args)
+    }
+}
+
+SustClamp = {
+    ".trap",
+    ".clamp",
+    ".zero"
+}
+
+UnlayeredTextureGeometry: ast::TextureGeometry = {
+    ".1d" => ast::TextureGeometry::OneD,
+    ".2d" => ast::TextureGeometry::TwoD,
+    ".3d" => ast::TextureGeometry::ThreeD,
+}
+
+TextureChannelType: ast::ScalarType = {
+    ".u32" => ast::ScalarType::U32,
+    ".s32" => ast::ScalarType::S32,
+    ".f16" => ast::ScalarType::F16,
+    ".f32" => ast::ScalarType::F32,
+}
+
+TextureCoordinateType: ast::ScalarType = {
+    ".s32" => ast::ScalarType::S32,
+    ".f32" => ast::ScalarType::F32,
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-shfl
+InstShfl: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "shfl" <shuffle_mode:ShflMode> ".b32" <args:Arg5Shfl> => {
+        ast::Instruction::Shfl(shuffle_mode, args)
+    },
+    "shfl" ".sync" <shuffle_mode:ShflMode> ".b32" <args:Arg5Shfl> "," Operand => {
+        ast::Instruction::Shfl(shuffle_mode, args)
+    }
+}
+
+Arg5Shfl: ast::Arg5Shfl<ast::ParsedArgParams<'input>> = {
+    <dst1:ExtendedID> <dst2:OptionalDst?> "," <src1:Operand> "," <src2:Operand> "," <src3:Operand> => {
+        ast::Arg5Shfl {
+            dst1,
+            dst2,
+            src1,
+            src2,
+            src3
+        }
+    }
+
+}
+
+ShflMode: ast::ShflMode = {
+    ".up" => ast::ShflMode::Up,
+    ".down" => ast::ShflMode::Down,
+    ".bfly" => ast::ShflMode::Bfly,
+    ".idx"  => ast::ShflMode::Idx
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#logic-and-shift-instructions-shf
+InstShf: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "shf" <direction: FunnelDirection> <mode:ShiftNormalization> ".b32" <args:Arg4> => {
+        ast::Instruction::Shf(ast::FunnelShift{direction, mode}, args)
+    }
+}
+
+FunnelDirection: ast::FunnelDirection = {
+    ".l" => ast::FunnelDirection::Left,
+    ".r" => ast::FunnelDirection::Right
+}
+
+ShiftNormalization: ast::ShiftNormalization = {
+    ".wrap" => ast::ShiftNormalization::Wrap,
+    ".clamp" => ast::ShiftNormalization::Clamp
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-vote-sync
+InstVote: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "vote" ".ballot" ".sync" ".b32" <dst:DstOperand> "," <negate:"!"?> <src1:Operand> "," <src2:Operand> => {
+        let mode = ast::VoteMode::Ballot;
+        let negate_pred = negate.is_some();
+        let args = ast::Arg3 {dst, src1, src2};
+        ast::Instruction::Vote(ast::VoteDetails{mode, negate_pred}, args)
+    },
+    "vote" ".sync" ".ballot" ".b32" <dst:DstOperand> "," <negate:"!"?> <src1:Operand> "," <src2:Operand> => {
+        let mode = ast::VoteMode::Ballot;
+        let negate_pred = negate.is_some();
+        let args = ast::Arg3 {dst, src1, src2};
+        ast::Instruction::Vote(ast::VoteDetails{mode, negate_pred}, args)
+    },
+    "vote" ".sync" ".any" ".pred" <dst:DstOperand> "," <negate:"!"?> <src1:Operand> "," <src2:Operand> => {
+        let mode = ast::VoteMode::Any;
+        let negate_pred = negate.is_some();
+        let args = ast::Arg3 {dst, src1, src2};
+        ast::Instruction::Vote(ast::VoteDetails{mode, negate_pred}, args)
+    },
+    "vote" ".sync" ".all" ".pred" <dst:DstOperand> "," <negate:"!"?> <src1:Operand> "," <src2:Operand> => {
+        let mode = ast::VoteMode::All;
+        let negate_pred = negate.is_some();
+        let args = ast::Arg3 {dst, src1, src2};
+        ast::Instruction::Vote(ast::VoteDetails{mode, negate_pred}, args)   
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#control-flow-instructions-exit
+InstExit: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "exit" => {
+        ast::Instruction::Exit
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#miscellaneous-instructions-trap
+InstTrap: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "trap" => {
+        ast::Instruction::Trap
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#miscellaneous-instructions-brkpt
+InstBrkpt: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "brkpt" => {
+        ast::Instruction::Brkpt
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#scalar-video-instructions-vshl-vshr
+InstVshr: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "vshr" ".u32" ".u32" ".u32" ".clamp" ".add" <arg:Arg4> => {
+        ast::Instruction::Vshr(arg)
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-bfind
+InstBfind: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "bfind" ".u32" <arg:Arg2> => {
+        let details = ast::BfindDetails { shift: false, type_: ast::ScalarType::U32 };
+        ast::Instruction::Bfind(details, arg)
+    },
+    "bfind" ".u64" <arg:Arg2> => {
+        let details = ast::BfindDetails { shift: false, type_: ast::ScalarType::U64 };
+        ast::Instruction::Bfind(details, arg)
+    },
+    "bfind" ".shiftamt" ".u32" <arg:Arg2> => {
+        let details = ast::BfindDetails { shift: true, type_: ast::ScalarType::U32 };
+        ast::Instruction::Bfind(details, arg)
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-dp4a
+InstDp4a: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "dp4a" ".s32" ".s32" <arg:Arg4> => {
+        ast::Instruction::Dp4a(ast::ScalarType::S32, arg)
+    },
+    "dp4a" ".u32" ".u32" <arg:Arg4> => {
+        ast::Instruction::Dp4a(ast::ScalarType::U32, arg)
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-match-sync
+InstMatch: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "match" ".any" ".sync" ".b32" <arg:Arg3> => {
+        ast::Instruction::MatchAny(arg)
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-red
+InstRed: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "red" <space:AtomSpace> <op: AtomUIntOp> <typ:UIntType3264> <src1:MemoryOperand> "," <src2:SrcOperandVec> => {
+        let atom_details = ast::AtomDetails {
+            semantics: ast::AtomSemantics::Relaxed,
+            scope: ast::MemScope::Gpu,
+            space,
+            inner: ast::AtomInnerDetails::Unsigned { op, typ }
+        };
+        let arg = ast::Arg2St { src1, src2 };
+        ast::Instruction::Red(atom_details, arg)
+    },
+    "red" <space:AtomSpace> <op:AtomBitOp> <typ:BitType> <src1:MemoryOperand> "," <src2:SrcOperandVec> => {
+        let atom_details = ast::AtomDetails {
+            semantics: ast::AtomSemantics::Relaxed,
+            scope: ast::MemScope::Gpu,
+            space,
+            inner: ast::AtomInnerDetails::Bit { op, typ }
+        };
+        let arg = ast::Arg2St { src1, src2 };
+        ast::Instruction::Red(atom_details, arg)
+    },
+    "red" <space:AtomSpace> ".add" <typ:FloatType> <src1:MemoryOperand> "," <src2:SrcOperandVec> => {
+        let op = ast::AtomFloatOp::Add;
+        let atom_details = ast::AtomDetails {
+            semantics: ast::AtomSemantics::Relaxed,
+            scope: ast::MemScope::Gpu,
+            space,
+            inner: ast::AtomInnerDetails::Float { op, typ }
+        };
+        let arg = ast::Arg2St { src1, src2 };
+        ast::Instruction::Red(atom_details, arg)
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#miscellaneous-instructions-nanosleep
+InstNanosleep: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    // Bare minimum for xgboost
+    "nanosleep" ".u32" <a:Arg1> => {
+        ast::Instruction::Nanosleep(a)
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#miscellaneous-instructions-nanosleep
+InstIsspacep: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "isspacep" ".local" <a:Arg2> => {
+        ast::Instruction::Isspacep(ast::StateSpace::Local, a)
+    },
+    "isspacep" ".shared" <a:Arg2> => {
+        ast::Instruction::Isspacep(ast::StateSpace::Shared, a)
+    },
+    "isspacep" ".global" <a:Arg2> => {
+        ast::Instruction::Isspacep(ast::StateSpace::Global, a)
+    }
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-sad
+InstSad: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "sad" <type_:IntType> <a:Arg4> => {
+        ast::Instruction::Sad(type_, a)
+    }
+}
+
+
+NegTypeFtz: ast::ScalarType = {
+    ".f16" => ast::ScalarType::F16,
+    ".f16x2" => ast::ScalarType::F16x2,
+    ".f32" => ast::ScalarType::F32,
+}
+
+NegTypeNonFtz: ast::ScalarType = {
+    ".s16" => ast::ScalarType::S16,
+    ".s32" => ast::ScalarType::S32,
+    ".s64" => ast::ScalarType::S64,
+    ".f64" => ast::ScalarType::F64
+}
+
+ArithDetails: ast::ArithDetails = {
+    <t:UIntType> => ast::ArithDetails::Unsigned(t),
+    <t:SIntType> => ast::ArithDetails::Signed(ast::ArithSInt {
+        typ: t,
+        saturate: false,
+    }),
+    ".sat" ".s32" => ast::ArithDetails::Signed(ast::ArithSInt {
+        typ: ast::ScalarType::S32,
+        saturate: true,
+    }),
+    <f:ArithFloat> => ast::ArithDetails::Float(f)
+}
+
+ArithFloat: ast::ArithFloat = {
+    <rn:RoundingModeFloat?> <ftz:".ftz"?> <sat:".sat"?> ".f32" => ast::ArithFloat {
+        typ: ast::ScalarType::F32,
+        rounding: rn,
+        flush_to_zero: Some(ftz.is_some()),
+        saturate: sat.is_some(),
+    },
+    <rn:RoundingModeFloat?> ".f64" => ast::ArithFloat {
+        typ: ast::ScalarType::F64,
+        rounding: rn,
+        flush_to_zero: None,
+        saturate: false,
+    },
+    <rn:".rn"?> <ftz:".ftz"?> <sat:".sat"?> ".f16" => ast::ArithFloat {
+        typ: ast::ScalarType::F16,
+        rounding: rn.map(|_| ast::RoundingMode::NearestEven),
+        flush_to_zero: Some(ftz.is_some()),
+        saturate: sat.is_some(),
+    },
+    <rn:".rn"?> <ftz:".ftz"?> <sat:".sat"?> ".f16x2" => ast::ArithFloat {
+        typ: ast::ScalarType::F16x2,
+        rounding: rn.map(|_| ast::RoundingMode::NearestEven),
+        flush_to_zero: Some(ftz.is_some()),
+        saturate: sat.is_some(),
+    },
+}
+
+ArithFloatMustRound: ast::ArithFloat = {
+    <rn:RoundingModeFloat> <ftz:".ftz"?> <sat:".sat"?> ".f32" => ast::ArithFloat {
+        typ: ast::ScalarType::F32,
+        rounding: Some(rn),
+        flush_to_zero: Some(ftz.is_some()),
+        saturate: sat.is_some(),
+    },
+    <rn:RoundingModeFloat> ".f64" => ast::ArithFloat {
+        typ: ast::ScalarType::F64,
+        rounding: Some(rn),
+        flush_to_zero: None,
+        saturate: false,
+    },
+    ".rn" <ftz:".ftz"?> <sat:".sat"?> ".f16" => ast::ArithFloat {
+        typ: ast::ScalarType::F16,
+        rounding: Some(ast::RoundingMode::NearestEven),
+        flush_to_zero: Some(ftz.is_some()),
+        saturate: sat.is_some(),
+    },
+    ".rn" <ftz:".ftz"?> <sat:".sat"?> ".f16x2" => ast::ArithFloat {
+        typ: ast::ScalarType::F16x2,
+        rounding: Some(ast::RoundingMode::NearestEven),
+        flush_to_zero: Some(ftz.is_some()),
+        saturate: sat.is_some(),
+    },
+    // Not in documentation, but used by bitsandbytes
+    ".rn" <ftz:".ftz"?> <sat:".sat"?> ".bf16" => ast::ArithFloat {
+        typ: ast::ScalarType::BF16,
+        rounding: Some(ast::RoundingMode::NearestEven),
+        flush_to_zero: Some(ftz.is_some()),
+        saturate: sat.is_some(),
+    },
+}
+
+Operand: ast::Operand<&'input str> = {
+    <r:ExtendedID> => ast::Operand::Reg(r),
+    <r:ExtendedID> "+" <offset:S64Num> => ast::Operand::RegOffset(r, offset),
+    <x:ImmediateValue> => ast::Operand::Imm(x)
+};
+
+CallOperand: ast::Operand<&'input str> = {
+    <r:ExtendedID> => ast::Operand::Reg(r),
+    <x:ImmediateValue> => ast::Operand::Imm(x)
+};
+
+// TODO: start parsing whole constants sub-language:
+//       https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#constants
+ImmediateValue: ast::ImmediateValue = {
+    <neg:"-"?> <x:NumToken> => {
+        let (num, radix, is_unsigned) = x;
+        if neg.is_some() {
+            // because abs(i32::MIN) > abs(i32::MAX)
+            let mut neg_num = "-".to_string();
+            neg_num.push_str(num);
+            match i64::from_str_radix(&neg_num, radix) {
+                Ok(x) => ast::ImmediateValue::S64(x),
+                Err(err) => {
+                    errors.push(ParseError::User { error: ast::PtxError::from(err) });
+                    ast::ImmediateValue::S64(0)
+                }
+            }
+        } else if is_unsigned {
+            match u64::from_str_radix(num, radix) {
+                Ok(x) => ast::ImmediateValue::U64(x),
+                Err(err) => {
+                    errors.push(ParseError::User { error: ast::PtxError::from(err) });
+                    ast::ImmediateValue::U64(0)
+                }
+            }
+        } else {
+            match i64::from_str_radix(num, radix) {
+                Ok(x) => ast::ImmediateValue::S64(x),
+                Err(_) => {
+                    match u64::from_str_radix(num, radix) {
+                        Ok(x) => ast::ImmediateValue::U64(x),
+                        Err(err) => {
+                            errors.push(ParseError::User { error: ast::PtxError::from(err) });
+                            ast::ImmediateValue::U64(0)
+                        }
+                    }
+                }
+            }
+        }
+    },
+    <f:F32Num> => {
+        ast::ImmediateValue::F32(f)
+    },
+    <f:F64Num> => {
+        ast::ImmediateValue::F64(f)
+    }
+}
+
+Arg1: ast::Arg1<ast::ParsedArgParams<'input>> = {
+    <src:ExtendedID> => ast::Arg1{<>}
+};
+
+Arg1Bar: ast::Arg1Bar<ast::ParsedArgParams<'input>> = {
+    <src:Operand> => ast::Arg1Bar{<>}
+};
+
+Arg2: ast::Arg2<ast::ParsedArgParams<'input>> = {
+    <dst:DstOperand> "," <src:SrcOperand> => ast::Arg2{<>}
+};
+
+MemberOperand: (&'input str, u8) = {
+    <pref:ExtendedID> "." <suf:ExtendedID> => {
+        let suf_idx = match vector_index(suf) {
+            Ok(x) => x,
+            Err(err) => {
+                errors.push(err);
+                0
+            }
+        };
+        (pref, suf_idx)
+    },
+    <pref:ExtendedID> <suf:DotID> => {
+        let suf_idx = match vector_index(&suf[1..]) {
+            Ok(x) => x,
+            Err(err) => {
+                errors.push(err);
+                0
+            }
+        };
+        (pref, suf_idx)
+    }
+};
+
+VectorExtract: Vec<ast::RegOrImmediate<&'input str>> = {
+    "{" <r1:RegOrImmediate> "}" => {
+        vec![r1]
+    },
+    "{" <r1:RegOrImmediate> "," <r2:RegOrImmediate> "}" => {
+        vec![r1, r2]
+    },
+    "{" <r1:RegOrImmediate> "," <r2:RegOrImmediate> "," <r3:RegOrImmediate> "," <r4:RegOrImmediate> "}" => {
+        vec![r1, r2, r3, r4]
+    },
+};
+
+RegOrImmediate: ast::RegOrImmediate<&'input str> = {
+    <r:ExtendedID> => ast::RegOrImmediate::Reg(r),
+    <imm:ImmediateValue> => ast::RegOrImmediate::Imm(imm),
+};
+
+Arg3: ast::Arg3<ast::ParsedArgParams<'input>> = {
+    <dst:DstOperand> "," <src1:Operand> "," <src2:Operand> => ast::Arg3{<>}
+};
+
+Arg3Atom: ast::Arg3<ast::ParsedArgParams<'input>> = {
+    <dst:DstOperand> "," "[" <src1:Operand> "]" "," <src2:Operand> => ast::Arg3{<>}
+};
+
+Arg4: ast::Arg4<ast::ParsedArgParams<'input>> = {
+    <dst:DstOperand> "," <src1:Operand> "," <src2:Operand> ","  <src3:Operand> => ast::Arg4{<>}
+};
+
+Arg4Atom: ast::Arg4<ast::ParsedArgParams<'input>> = {
+    <dst:DstOperand> "," "[" <src1:Operand> "]" "," <src2:Operand> ","  <src3:Operand> => ast::Arg4{<>}
+};
+
+Arg4Setp: ast::Arg4Setp<ast::ParsedArgParams<'input>> = {
+    <dst1:ExtendedID> <dst2:OptionalDst?> "," <src1:Operand> "," <src2:Operand> => ast::Arg4Setp{<>}
+};
+
+Arg5: ast::Arg5<ast::ParsedArgParams<'input>> = {
+    <dst:DstOperand> "," <src1:Operand> "," <src2:Operand> ","  <src3:Operand> ","  <src4:Operand> => ast::Arg5{<>}
+};
+
+ArgCall: (Vec<&'input str>, &'input str, Vec<ast::Operand<&'input str>>, Option<&'input str>) = {
+    "(" <ret_params:Comma<ExtendedID>> ")" "," <func:ExtendedID> "," "(" <param_list:Comma<CallOperand>> ")" => {
+        (ret_params, func, param_list, None)
+    },
+    "(" <ret_params:Comma<ExtendedID>> ")" "," <func:ExtendedID> "," "(" <param_list:Comma<CallOperand>> ")" "," <fproto:ExtendedID> => {
+        (ret_params, func, param_list, Some(fproto))
+    },
+    "(" <ret_params:Comma<ExtendedID>> ")" "," <func:ExtendedID> => {
+        (ret_params, func, Vec::new(), None)
+    },
+    "(" <ret_params:Comma<ExtendedID>> ")" "," <func:ExtendedID> "," <fproto:ExtendedID> => {
+        (ret_params, func, Vec::new(), Some(fproto))
+    },
+    <func:ExtendedID> "," "(" <param_list:Comma<CallOperand>> ")" =>
+        (Vec::new(), func, param_list, None),
+    <func:ExtendedID> "," "(" <param_list:Comma<CallOperand>> ")" "," <fproto:ExtendedID> =>
+        (Vec::new(), func, param_list, Some(fproto)),
+    <func:ExtendedID> => (Vec::new(), func, Vec::<ast::Operand<_>>::new(), None),
+    <func:ExtendedID> "," <fproto:ExtendedID> =>
+        (Vec::new(), func, Vec::<ast::Operand<_>>::new(), Some(fproto)),
+};
+
+OptionalDst: &'input str = {
+    "|" <dst2:ExtendedID> => dst2
+}
+
+SrcOperand: ast::Operand<&'input str> = {
+    <r:ExtendedID> => ast::Operand::Reg(r),
+    <r:ExtendedID> "+" <offset:S64Num> => ast::Operand::RegOffset(r, offset),
+    <x:ImmediateValue> => ast::Operand::Imm(x),
+    <mem_op:MemberOperand> => {
+        let (reg, idx) = mem_op;
+        ast::Operand::VecMember(reg, idx)
+    }
+}
+
+SrcOperandVec: ast::Operand<&'input str> = {
+    <normal:SrcOperand> => normal,
+    <vec:VectorExtract> => ast::Operand::VecPack(vec),
+}
+
+DstOperand: ast::Operand<&'input str> = {
+    <r:ExtendedID> => ast::Operand::Reg(r),
+    <mem_op:MemberOperand> => {
+        let (reg, idx) = mem_op;
+        ast::Operand::VecMember(reg, idx)
+    }
+}
+
+DstOperandVec: ast::Operand<&'input str> = {
+    <normal:DstOperand> => normal,
+    <vec:VectorExtract> => ast::Operand::VecPack(vec),
+}
+
+VectorPrefix: u8 = {
+    ".v2" => 2,
+    ".v4" => 4
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#debugging-directives-file
+File = {
+    ".file" U32Num String ("," U32Num "," U32Num)?
+};
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#debugging-directives-section
+Section = {
+    ".section" DotID "{" SectionDwarfLines* "}"
+};
+
+SectionDwarfLines: () = {
+    AnyBitType CommaNonEmpty<U32Num> => {},
+    SectionLabel ":",
+    ".b32" SectionLabel,
+    ".b64" SectionLabel,
+    ".b32" SectionLabel "+" U32Num,
+    ".b64" SectionLabel "+" U32Num,
+};
+
+SectionLabel = {
+    ID,
+    DotID
+};
+
+AnyBitType: ast::ScalarType = {
+    ".b8" => ast::ScalarType::B8,
+    ".b16" => ast::ScalarType::B16,
+    ".b32" => ast::ScalarType::B32,
+    ".b64" => ast::ScalarType::B64,
+};
+
+// [0] and [] are treated the same
+ArrayDimensions: Vec<u64> = {
+    ArrayEmptyDimension => vec![0u64],
+    ArrayEmptyDimension <dims:ArrayDimension+> => {
+        let mut dims = dims;
+        let mut result = vec![0u64];
+        result.append(&mut dims);
+        result
+    },
+    <dims:ArrayDimension+> => dims
+}
+
+ArrayEmptyDimension = {
+    "[" "]" 
+}
+
+ArrayDimension: u64  = {
+    "[" <n:U32Num> "]" => n as _,
+}
+
+ArrayInitializer: ast::NumsOrArrays<'input> = {
+    "=" <nums:NumsOrArraysBracket> => nums
+}
+
+NumsOrArraysBracket: ast::NumsOrArrays<'input> = {
+    "{" <nums:NumsOrArrays> "}" => nums
+}
+
+NumsOrArrays: ast::NumsOrArrays<'input> = {
+    <n:Comma<NumsOrArraysBracket>> => ast::NumsOrArrays::Arrays(n),
+    <n:CommaNonEmpty<NumToken>> => ast::NumsOrArrays::Nums(n.into_iter().map(|(x,radix,_)| (x, radix)).collect()),
+}
+
+Comma<T>: Vec<T> = {
+    <v:(<T> ",")*> <e:T?> => match e {
+        None => v,
+        Some(e) => {
+            let mut v = v;
+            v.push(e);
+            v
+        }
+    }
+};
+
+CommaNonEmpty<T>: Vec<T> = {
+    <v:(<T> ",")*> <e:T> => {
+        let mut v = v;
+        v.push(e);
+        v
+    }
+};

@@ -1,0 +1,1 @@
+bindgen $Env:HIP_PATH/include/rocsparse/rocsparse.h -o src/rocsparse.rs --no-layout-tests --default-enum-style=newtype --no-derive-debug --allowlist-function "rocsparse_.*" --allowlist-var "ROCSPARSE_*" --must-use-type rocsparse_status -- -I"$Env:HIP_PATH/include"

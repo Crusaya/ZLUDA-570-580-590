@@ -1,9 +1,7 @@
-// TODO: remove duplication with zluda_trace
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn GetCurrentThreadId() -> u32;
-}
+use std::ffi::c_void;
 
-pub(crate) fn current_thread() -> u32 {
-    unsafe { GetCurrentThreadId() }
+use winapi::um::{heapapi::HeapCreate, winnt::HEAP_NO_SERIALIZE};
+
+pub unsafe fn heap_create() -> *mut c_void {
+    HeapCreate(HEAP_NO_SERIALIZE, 0, 0)
 }

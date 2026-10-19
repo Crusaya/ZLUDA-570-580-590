@@ -5,6 +5,9 @@
 .extern .shared .b32 shared_ex[];
 .shared .b32 shared_mod[4];
 
+
+
+
 .func (.reg .b64 out) add()
 {
     .reg .u64 	    temp1;

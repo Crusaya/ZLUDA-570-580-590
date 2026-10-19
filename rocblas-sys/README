@@ -1,0 +1,1 @@
+bindgen $Env:HIP_PATH/include/rocblas/rocblas.h -o src/rocblas.rs --no-layout-tests --default-enum-style=newtype --no-derive-debug --allowlist-function "rocblas_.*" --allowlist-var "ROCBLAS_*" --must-use-type rocblas_status -- -I"$Env:HIP_PATH/include"

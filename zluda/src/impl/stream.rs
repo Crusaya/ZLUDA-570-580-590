@@ -1,92 +1,223 @@
+use super::{context, LiveCheck, ZludaObject};
+use crate::{hip_call_cuda, r#impl::hipfix};
+use cuda_types::{CUhostFn, CUresult};
 use hip_runtime_sys::*;
+use std::{ffi::c_void, ptr};
 
-pub(crate) fn synchronize(stream: hipStream_t) -> hipError_t {
-    unsafe { hipStreamSynchronize(stream) }
-}
+pub(crate) const CU_STREAM_NULL: *mut Stream = 0 as *mut _;
+pub(crate) const CU_STREAM_LEGACY: *mut Stream = 1 as *mut _;
+pub(crate) const CU_STREAM_PER_THREAD: *mut Stream = 2 as *mut _;
 
-pub(crate) fn create(stream: *mut hipStream_t, flags: ::core::ffi::c_uint) -> hipError_t {
-    unsafe { hipStreamCreateWithFlags(stream, flags) }
-}
+pub(crate) type Stream = LiveCheck<StreamData>;
 
-pub(crate) fn create_with_priority(
-    stream: *mut hipStream_t,
-    flags: ::core::ffi::c_uint,
-    priority: ::core::ffi::c_int,
-) -> hipError_t {
-    unsafe { hipStreamCreateWithPriority(stream, flags, priority) }
-}
+impl ZludaObject for StreamData {
+    #[cfg(target_pointer_width = "64")]
+    const LIVENESS_COOKIE: usize = 0x512097354de18d35;
+    #[cfg(target_pointer_width = "32")]
+    const LIVENESS_COOKIE: usize = 0x77d5cc0b;
+    const LIVENESS_FAIL: CUresult = CUresult::CUDA_ERROR_INVALID_HANDLE;
 
-pub(crate) fn destroy_v2(stream: hipStream_t) -> hipError_t {
-    unsafe { hipStreamDestroy(stream) }
-}
-
-pub(crate) fn begin_capture_v2(stream: hipStream_t, mode: hipStreamCaptureMode) -> hipError_t {
-    unsafe { hipStreamBeginCapture(stream, mode) }
-}
-
-pub(crate) fn end_capture(stream: hipStream_t, graph: *mut hipGraph_t) -> hipError_t {
-    unsafe { hipStreamEndCapture(stream, graph) }
-}
-
-pub(crate) fn is_capturing(
-    stream: hipStream_t,
-    capture_status: *mut hipStreamCaptureStatus,
-) -> hipError_t {
-    unsafe { hipStreamIsCapturing(stream, capture_status) }
-}
-
-pub(crate) fn get_capture_info_v2(
-    stream: hipStream_t,
-    capture_status: *mut hipStreamCaptureStatus,
-    id: *mut ::core::ffi::c_ulonglong,
-    graph_out: *mut hipGraph_t,
-    dependencies_out: *mut *const hipGraphNode_t,
-    num_dependencies_out: *mut usize,
-) -> hipError_t {
-    unsafe {
-        hipStreamGetCaptureInfo_v2(
-            stream,
-            capture_status,
-            id,
-            graph_out,
-            dependencies_out,
-            num_dependencies_out,
-        )
+    fn drop_with_result(&mut self, by_owner: bool) -> Result<(), CUresult> {
+        if !by_owner {
+            let ctx = unsafe { LiveCheck::as_result(self.ctx)? };
+            {
+                ctx.with_inner_mut(|ctx_mutable| {
+                    ctx_mutable
+                        .streams
+                        .remove(&unsafe { LiveCheck::from_raw(&mut *self) });
+                })?;
+            }
+        }
+        hip_call_cuda!(hipStreamDestroy(self.base));
+        Ok(())
     }
 }
 
-pub(crate) fn get_capture_info_v3(
-    stream: hipStream_t,
+pub(crate) struct StreamData {
+    pub(crate) base: hipStream_t,
+    pub(crate) ctx: *mut context::Context,
+}
+
+pub(crate) unsafe fn create_with_priority(
+    p_stream: *mut *mut Stream,
+    flags: ::std::os::raw::c_uint,
+    priority: ::std::os::raw::c_int,
+) -> Result<(), CUresult> {
+    if p_stream == ptr::null_mut() {
+        return Err(CUresult::CUDA_ERROR_INVALID_VALUE);
+    }
+    let mut hip_stream = ptr::null_mut();
+    hip_call_cuda!(hipStreamCreateWithPriority(
+        &mut hip_stream,
+        flags,
+        priority
+    ));
+    let stream = Box::into_raw(Box::new(LiveCheck::new(StreamData {
+        base: hip_stream,
+        ctx: ptr::null_mut(),
+    })));
+    let ctx = context::with_current(|ctx| {
+        ctx.with_inner_mut(|ctx_mutable| {
+            ctx_mutable.streams.insert(stream);
+        })?;
+        Ok(LiveCheck::from_raw(ctx as *const _ as _))
+    })??;
+    (*stream).as_mut_unchecked().ctx = ctx;
+    *p_stream = stream;
+    Ok(())
+}
+
+pub(crate) unsafe fn begin_capture(
+    stream: *mut Stream,
+    mode: hipStreamCaptureMode,
+) -> Result<(), CUresult> {
+    let hip_stream = as_hip_stream(stream)?;
+    hip_call_cuda! { hipStreamBeginCapture(hip_stream, mode) };
+    Ok(())
+}
+
+pub(crate) unsafe fn end_capture(
+    stream: *mut Stream,
+    p_graph: *mut hipGraph_t,
+) -> Result<(), CUresult> {
+    let hip_stream = as_hip_stream(stream)?;
+    hip_call_cuda! { hipStreamEndCapture(hip_stream, p_graph) };
+    Ok(())
+}
+
+pub(crate) unsafe fn get_ctx(
+    stream: *mut Stream,
+    pctx: *mut *mut context::Context,
+) -> Result<(), CUresult> {
+    let ctx = if as_default_stream(stream).is_some() {
+        context::with_current(|ctx| LiveCheck::from_raw(ctx as *const _ as _))?
+    } else {
+        let stream = LiveCheck::as_result(stream)?;
+        stream.ctx
+    };
+    *pctx = ctx;
+    Ok(())
+}
+
+pub(crate) unsafe fn synchronize(
+    stream: *mut Stream,
+    default_stream_per_thread: bool,
+) -> Result<(), CUresult> {
+    let hip_stream = hipfix::as_hip_stream_per_thread(stream, default_stream_per_thread)?;
+    hip_call_cuda!(hipStreamSynchronize(hip_stream));
+    Ok(())
+}
+
+pub(crate) unsafe fn thread_exchange_capture_mode(
+    mode: *mut hipStreamCaptureMode,
+) -> Result<(), CUresult> {
+    hip_call_cuda!(hipThreadExchangeStreamCaptureMode(mode));
+    Ok(())
+}
+
+pub(crate) unsafe fn destroy(stream: *mut Stream) -> Result<(), CUresult> {
+    if as_default_stream(stream).is_some() {
+        return Err(CUresult::CUDA_ERROR_INVALID_VALUE);
+    }
+    LiveCheck::drop_box_with_result(stream, false)
+}
+
+pub(crate) fn as_default_stream(stream: *mut Stream) -> Option<hipStream_t> {
+    match stream {
+        CU_STREAM_NULL | CU_STREAM_LEGACY => Some(hipStreamNull),
+        CU_STREAM_PER_THREAD => Some(hipStreamPerThread),
+        _ => None,
+    }
+}
+
+pub(crate) unsafe fn as_hip_stream(stream: *mut Stream) -> Result<hipStream_t, CUresult> {
+    Ok(match as_default_stream(stream) {
+        Some(s) => s,
+        None => LiveCheck::as_result(stream)?.base,
+    })
+}
+
+pub(crate) unsafe fn launch_host_func(
+    stream: *mut Stream,
+    fn_: CUhostFn,
+    user_data: *mut ::std::os::raw::c_void,
+) -> Result<(), CUresult> {
+    let fn_ = *fn_.as_ref().ok_or(CUresult::CUDA_ERROR_INVALID_VALUE)?;
+    let hip_stream = as_hip_stream(stream)?;
+    // TODO: use hipLaunchHostFunc when it comes to Windows
+    //hip_call_cuda!(hipLaunchHostFunc(hip_stream, fn_, user_data));
+    let callback = Box::new(HostCallback { fn_, user_data });
+    hip_call_cuda!(hipStreamAddCallback(
+        hip_stream,
+        Some(steam_callback_to_host_func),
+        Box::into_raw(callback) as _,
+        0
+    ));
+    Ok(())
+}
+
+pub(crate) unsafe fn wait_event(
+    stream: *mut Stream,
+    h_event: hipEvent_t,
+    flags: ::std::os::raw::c_uint,
+    default_stream_per_thread: bool,
+) -> Result<(), CUresult> {
+    let hip_stream = hipfix::as_hip_stream_per_thread(stream, default_stream_per_thread)?;
+    hip_call_cuda! { hipStreamWaitEvent(hip_stream, h_event, flags) };
+    Ok(())
+}
+
+unsafe extern "C" fn steam_callback_to_host_func(
+    _stream: hipStream_t,
+    result: hipError_t,
+    callback_ptr: *mut c_void,
+) {
+    if result != hipError_t::hipSuccess {
+        return;
+    }
+    let callback_ptr = &*(callback_ptr as *const HostCallback);
+    (callback_ptr.fn_)(callback_ptr.user_data);
+}
+
+struct HostCallback {
+    #[allow(non_snake_case)]
+    fn_: unsafe extern "system" fn(userData: *mut ::std::os::raw::c_void),
+    user_data: *mut ::std::os::raw::c_void,
+}
+
+pub(crate) unsafe fn query(stream: *mut Stream) -> Result<(), CUresult> {
+    let hip_stream = as_hip_stream(stream)?;
+    hip_call_cuda! { hipStreamQuery(hip_stream) };
+    Ok(())
+}
+
+pub(crate) unsafe fn get_capture_info(
+    stream: *mut Stream,
     capture_status_out: *mut hipStreamCaptureStatus,
-    id_out: *mut ::core::ffi::c_ulonglong,
-    graph_out: *mut hipGraph_t,
-    dependencies_out: *mut *const hipGraphNode_t,
-    edge_data_out: *mut *const cuda_types::cuda::CUgraphEdgeData,
-    num_dependencies_out: *mut usize,
-) -> hipError_t {
-    if !edge_data_out.is_null() {
-        return hipError_t::ErrorNotSupported;
-    }
-    unsafe {
-        hipStreamGetCaptureInfo_v2(
-            stream,
-            capture_status_out,
-            id_out,
-            graph_out,
-            dependencies_out,
-            num_dependencies_out,
-        )
-    }
+    id_out: *mut u64,
+) -> Result<(), CUresult> {
+    let hip_stream = as_hip_stream(stream)?;
+    hip_call_cuda! { hipStreamGetCaptureInfo(hip_stream, capture_status_out, id_out) };
+    Ok(())
 }
 
-pub(crate) fn wait_event(
-    stream: hipStream_t,
-    event: hipEvent_t,
-    flags: ::core::ffi::c_uint,
-) -> hipError_t {
-    unsafe { hipStreamWaitEvent(stream, event, flags) }
+pub(crate) unsafe fn get_flags(stream: *mut Stream, flags: *mut u32) -> Result<(), CUresult> {
+    let hip_stream = as_hip_stream(stream)?;
+    hip_call_cuda! { hipStreamGetFlags(hip_stream, flags) };
+    Ok(())
 }
 
-pub(crate) fn query(stream: hipStream_t) -> hipError_t {
-    unsafe { hipStreamQuery(stream) }
+pub(crate) unsafe fn get_priority(stream: *mut Stream, priority: *mut i32) -> Result<(), CUresult> {
+    let hip_stream = as_hip_stream(stream)?;
+    hip_call_cuda! { hipStreamGetPriority(hip_stream, priority) };
+    Ok(())
+}
+
+pub(crate) unsafe fn is_capturing(
+    stream: *mut Stream,
+    capture_status: *mut hipStreamCaptureStatus,
+) -> Result<(), CUresult> {
+    let hip_stream = as_hip_stream(stream)?;
+    hip_call_cuda! { hipStreamIsCapturing(hip_stream, capture_status) };
+    Ok(())
 }

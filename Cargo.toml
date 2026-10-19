@@ -2,78 +2,65 @@
 
 resolver = "2"
 
+# Remember to also update the project's Cargo.toml
+# if it's a top-level project
 members = [
-    "compiler",
-    "cuda_check",
-    "cuda_macros",
+    "atiadlxx-sys",
+    "comgr",
+    "cuda_base",
     "cuda_types",
-    "dark_api",
-    "detours-sys",
-    "ext/highs-sys",
-    "ext/hip_runtime-sys",
-    "ext/hipblaslt-sys",
-    "ext/hipfft-sys",
-    "ext/miopen-sys",
-    "ext/rocblas-sys",
-    "format",
-    "kernel_metadata",
-    "nvapi",
-    "nvapi_trace",
-    "ptx_parser_macros_impl",
-    "ptx_parser_macros",
-    "ptx_parser",
+    "ext/detours-sys",
+    "ext/llvm-sys.rs",
+    "hip_common",
+    "hip_runtime-sys",
+    "hipblaslt-sys",
+    "hipfft-sys",
+    "hiprt-sys",
+    "miopen-sys",
+    "offline_compiler",
+    "optix_base",
+    "optix_dump",
+    "process_address_table",
     "ptx",
-    "ptxas",
+    "rocblas-sys",
+    "rocm_smi-sys",
+    "rocsparse-sys",
     "xtask",
-    "zluda_bindgen",
+    "zluda",
+    "zluda_api",
     "zluda_blas",
     "zluda_blaslt",
-    "zluda_cache",
-    "zluda_common",
+    "zluda_ccl",
+    "zluda_dark_api",
     "zluda_dnn",
-    "zluda_dnn8",
-    "zluda_dnn9",
+    "zluda_dump",
     "zluda_fft",
+    "zluda_fftw",
     "zluda_inject",
-    "zluda_ld",
+    "zluda_lib",
+    "zluda_llvm",
     "zluda_ml",
-    "zluda_precompile",
     "zluda_redirect",
-    "zluda_server_common",
+    "zluda_rt",
+    "zluda_rtc",
+    "zluda_runtime",
     "zluda_sparse",
-    "zluda_trace_blas",
-    "zluda_trace_blaslt",
-    "zluda_trace_common",
-    "zluda_trace_dnn8",
-    "zluda_trace_dnn9",
-    "zluda_trace_fft",
-    "zluda_trace_nvml",
-    "zluda_trace_sparse",
-    "zluda_trace",
-    "zluda",
-    "zluda32",
-    "zluda64_server",
 ]
 
-default-members = ["zluda", "zluda_ml", "zluda_inject", "zluda_redirect", "compiler"]
+# Cargo does not support OS-specific or profile-specific
+# targets. We keep list here to bare minimum and rely on xtask
+default-members = [
+    "zluda_lib",
+    "zluda_ml",
+    "zluda_inject",
+    "zluda_redirect"
+]
 
-[profile.release-lto]
-inherits = "release"
-codegen-units = 1
-lto = true
+[profile.dev.package.blake3]
+opt-level = 3
 
-# By default (even in dev) we build LLVM in Release (opt-level is controlled 
-# by cmake). That's because LLVM in Debug is excruciatingly slow and makes any
-# kind of debugging impossible. This profile is a special configuration for when
-# you want to build LLVM in Debug
-[profile.dev-llvm]
-inherits = "dev"
-
-[profile.dev-llvm.package.xtask]
-opt-level = 2
+[profile.dev.package.lz4-sys]
+opt-level = 3
 
 [profile.dev.package.xtask]
 opt-level = 2
-
-[patch.crates-io]
-highs-sys = { path = "ext/highs-sys" }
