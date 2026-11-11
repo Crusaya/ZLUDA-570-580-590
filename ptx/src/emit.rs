@@ -1688,16 +1688,10 @@ fn emit_inst_rsqrt(
         (details.typ, ast::StateSpace::Reg, args.src),
         intrinsic_fn,
     )?;
-    unsafe { LLVMZludaSetFastMathFlags(sqrt_result, FastMathFlags::ApproxFunc) };
-    let result = ctx.names.register_result(args.dst, |dst_name| unsafe {
+    // Keep this sequence precise; fast-math folding caused large Cycles normal discontinuities.
+    ctx.names.register_result(args.dst, |dst_name| unsafe {
         LLVMBuildFDiv(builder, const_1, sqrt_result, dst_name)
     });
-    unsafe {
-        LLVMZludaSetFastMathFlags(
-            result,
-            FastMathFlags::ApproxFunc | FastMathFlags::AllowReciprocal,
-        )
-    };
     Ok(())
 }
 
