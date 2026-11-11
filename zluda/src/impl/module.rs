@@ -318,13 +318,14 @@ pub(crate) fn link_build_zluda_module(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| CUresult::CUDA_ERROR_INVALID_PTX)?;
-    let mut llvm_module = ptx::to_llvm_module(compilation_mode, asts);
+    let mut llvm_module = ptx::to_llvm_module_for_isa(compilation_mode, asts, isa);
     if !cfg!(debug_assertions) {
         llvm_module = llvm_module.or_else(|_| {
-            ptx::to_llvm_module(
+            ptx::to_llvm_module_for_isa(
                 compilation_mode,
                 vec![ptx::ModuleParser::parse_checked(EMPTY_MODULE)
                     .map_err(|_| ptx::TranslateError::Todo)?],
+                isa,
             )
         });
     }

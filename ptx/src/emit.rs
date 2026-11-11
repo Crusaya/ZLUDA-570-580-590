@@ -1170,6 +1170,8 @@ fn emit_instruction(
         | ast::Instruction::BarRed(..)
         | ast::Instruction::Bfe { .. }
         | ast::Instruction::Bfi { .. }
+        | ast::Instruction::Copysign(..)
+        | ast::Instruction::Tanh(_)
         | ast::Instruction::MadC { .. }
         | ast::Instruction::MadCC { .. }
         | ast::Instruction::AddC { .. }

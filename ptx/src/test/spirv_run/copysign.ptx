@@ -1,0 +1,25 @@
+.version 6.5
+.target sm_30
+.address_size 64
+
+.visible .entry copysign(
+    .param .u64 magnitude,
+    .param .u64 sign,
+    .param .u64 output
+)
+{
+    .reg .u64 magnitude_addr;
+    .reg .u64 sign_addr;
+    .reg .u64 output_addr;
+    .reg .f32 magnitude_value;
+    .reg .f32 sign_value;
+
+    ld.param.u64 magnitude_addr, [magnitude];
+    ld.param.u64 sign_addr, [sign];
+    ld.param.u64 output_addr, [output];
+    ld.f32 magnitude_value, [magnitude_addr];
+    ld.f32 sign_value, [sign_addr];
+    copysign.f32 magnitude_value, magnitude_value, sign_value;
+    st.f32 [output_addr], magnitude_value;
+    ret;
+}

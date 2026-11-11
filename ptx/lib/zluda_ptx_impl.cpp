@@ -1,5 +1,6 @@
 // Compile and disassemble:
 //   python3 ./cvt.py > cvt.h && /opt/rocm/llvm/bin/clang -std=c++20 -Xclang -no-opaque-pointers -Wall -Wextra -Wsign-compare -Wconversion -x hip zluda_ptx_impl.cpp -S -emit-llvm --cuda-device-only -nogpulib -O3 -Xclang -fallow-half-arguments-and-returns -o - | sed -e 's/define/define linkonce_odr/g' | sed -e '/@llvm.used/d' | sed -e 's/\"target-cpu\"=\"[^\"]*\"//g' | sed -e 's/\"target-features\"=\"[^\"]*\"//g' | sed -e 's/\"denormal-fp-math-f32\"=\"[^\"]*\"//g' | sed -e 's/!llvm.module.flags = !{!0, !1, !2, !3, !4}/!llvm.module.flags = !{ }/g' | sed -e 's/memory(none)/readnone/g' | sed -e 's/memory(argmem: readwrite, inaccessiblemem: readwrite)/inaccessiblemem_or_argmemonly/g' | sed -e 's/memory(read)/readonly/g' | sed -e 's/memory(argmem: readwrite)/argmemonly/g'  | llvm-as-13 -o zluda_ptx_impl.bc && /opt/rocm/llvm/bin/llvm-dis zluda_ptx_impl.bc
+// Add -DZLUDA_PTX_IMPL_GFX8 when generating the GFX8-compatible helper bitcode.
 // Compile to binary:
 //   /opt/rocm/llvm/bin/clang -x ir -target amdgcn-amd-amdhsa -Xlinker --no-undefined zluda_ptx_impl.bc -mno-wavefrontsize64 -mcpu=gfx1030
 // Decompile:
@@ -87,6 +88,11 @@ enum class CompilationMode : uint8_t
 #define SHARED_SPACE __attribute__((address_space(3)))
 #define CONSTANT_SPACE __attribute__((address_space(4)))
 #define PRIVATE_SPACE __attribute__((address_space(5)))
+#if defined(ZLUDA_PTX_IMPL_GFX8)
+#define IMAGE_DIM(DIM)
+#else
+#define IMAGE_DIM(DIM) " dim:" DIM
+#endif
 
 typedef half half4 __attribute__((ext_vector_type(4)));
 
@@ -232,23 +238,23 @@ static __device__ void image_store_pck(T value, typename Coordinates<geo>::type 
         uint value_dword = transmute<uint>(value);
         if constexpr (geo == ImageGeometry::_1D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0x1 dim:1D unorm" : : "v"(value_dword), "v"(coord.x), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0x1" IMAGE_DIM("1D") " unorm" : : "v"(value_dword), "v"(coord.x), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_2D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0x1 dim:2D unorm" : : "v"(value_dword), "v"(coord), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0x1" IMAGE_DIM("2D") " unorm" : : "v"(value_dword), "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_3D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0x1 dim:3D unorm" : : "v"(value_dword), "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0x1" IMAGE_DIM("3D") " unorm" : : "v"(value_dword), "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A1D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0x1 dim:1D_ARRAY unorm" : : "v"(value_dword), "v"(coord), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0x1" IMAGE_DIM("1D_ARRAY") " unorm" : : "v"(value_dword), "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A2D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0x1 dim:2D_ARRAY unorm" : : "v"(value_dword), "v"(coord), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0x1" IMAGE_DIM("2D_ARRAY") " unorm" : : "v"(value_dword), "v"(coord), "s"(*surface) : "memory");
         }
         else
         {
@@ -260,23 +266,23 @@ static __device__ void image_store_pck(T value, typename Coordinates<geo>::type 
         uint2::Native_vec_ value_dword2 = transmute<uint2::Native_vec_>(value);
         if constexpr (geo == ImageGeometry::_1D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0x3 dim:1D unorm" : : "v"(value_dword2), "v"(coord.x), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0x3" IMAGE_DIM("1D") " unorm" : : "v"(value_dword2), "v"(coord.x), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_2D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0x3 dim:2D unorm" : : "v"(value_dword2), "v"(coord), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0x3" IMAGE_DIM("2D") " unorm" : : "v"(value_dword2), "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_3D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0x3 dim:3D unorm" : : "v"(value_dword2), "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0x3" IMAGE_DIM("3D") " unorm" : : "v"(value_dword2), "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A1D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0x3 dim:1D_ARRAY unorm" : : "v"(value_dword2), "v"(coord), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0x3" IMAGE_DIM("1D_ARRAY") " unorm" : : "v"(value_dword2), "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A2D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0x3 dim:2D_ARRAY unorm" : : "v"(value_dword2), "v"(coord), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0x3" IMAGE_DIM("2D_ARRAY") " unorm" : : "v"(value_dword2), "v"(coord), "s"(*surface) : "memory");
         }
         else
         {
@@ -288,23 +294,23 @@ static __device__ void image_store_pck(T value, typename Coordinates<geo>::type 
         uint4::Native_vec_ value_dword4 = transmute<uint4::Native_vec_>(value);
         if constexpr (geo == ImageGeometry::_1D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0xf dim:1D unorm" : : "v"(value_dword4), "v"(coord.x), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("1D") " unorm" : : "v"(value_dword4), "v"(coord.x), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_2D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0xf dim:2D unorm" : : "v"(value_dword4), "v"(coord), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("2D") " unorm" : : "v"(value_dword4), "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_3D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0xf dim:3D unorm" : : "v"(value_dword4), "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("3D") " unorm" : : "v"(value_dword4), "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A1D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0xf dim:1D_ARRAY unorm" : : "v"(value_dword4), "v"(coord), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("1D_ARRAY") " unorm" : : "v"(value_dword4), "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A2D)
         {
-            asm("image_store_pck %0, %1, %2 dmask:0xf dim:2D_ARRAY unorm" : : "v"(value_dword4), "v"(coord), "s"(*surface) : "memory");
+            asm("image_store_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("2D_ARRAY") " unorm" : : "v"(value_dword4), "v"(coord), "s"(*surface) : "memory");
         }
         else
         {
@@ -325,23 +331,23 @@ static __device__ T image_load_pck(typename Coordinates<geo>::type coord, surfac
         uint data;
         if constexpr (geo == ImageGeometry::_1D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0x1 dim:1D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord.x), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0x1" IMAGE_DIM("1D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord.x), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_2D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0x1 dim:2D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0x1" IMAGE_DIM("2D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_3D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0x1 dim:3D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0x1" IMAGE_DIM("3D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A1D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0x1 dim:1D_ARRAY unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0x1" IMAGE_DIM("1D_ARRAY") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A2D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0x1 dim:2D_ARRAY unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0x1" IMAGE_DIM("2D_ARRAY") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
         }
         else
         {
@@ -354,23 +360,23 @@ static __device__ T image_load_pck(typename Coordinates<geo>::type coord, surfac
         uint2::Native_vec_ data;
         if constexpr (geo == ImageGeometry::_1D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0x3 dim:1D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord.x), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0x3" IMAGE_DIM("1D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord.x), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_2D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0x3 dim:2D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0x3" IMAGE_DIM("2D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_3D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0x3 dim:3D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0x3" IMAGE_DIM("3D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A1D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0x3 dim:1D_ARRAY unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0x3" IMAGE_DIM("1D_ARRAY") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A2D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0x3 dim:2D_ARRAY unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0x3" IMAGE_DIM("2D_ARRAY") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
         }
         else
         {
@@ -383,23 +389,23 @@ static __device__ T image_load_pck(typename Coordinates<geo>::type coord, surfac
         uint4::Native_vec_ data;
         if constexpr (geo == ImageGeometry::_1D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0xf dim:1D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord.x), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("1D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord.x), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_2D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0xf dim:2D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("2D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::_3D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0xf dim:3D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("3D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A1D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0xf dim:1D_ARRAY unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("1D_ARRAY") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
         }
         else if constexpr (geo == ImageGeometry::A2D)
         {
-            asm("image_load_pck %0, %1, %2 dmask:0xf dim:2D_ARRAY unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+            asm("image_load_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("2D_ARRAY") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
         }
         else
         {
@@ -419,23 +425,23 @@ static __device__ uint4::Native_vec_ image_load_pck_full(typename Coordinates<ge
     uint4::Native_vec_ data;
     if constexpr (geo == ImageGeometry::_1D)
     {
-        asm("image_load_pck %0, %1, %2 dmask:0xf dim:1D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord.x), "s"(*surface) : "memory");
+        asm("image_load_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("1D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord.x), "s"(*surface) : "memory");
     }
     else if constexpr (geo == ImageGeometry::_2D)
     {
-        asm("image_load_pck %0, %1, %2 dmask:0xf dim:2D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+        asm("image_load_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("2D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
     }
     else if constexpr (geo == ImageGeometry::_3D)
     {
-        asm("image_load_pck %0, %1, %2 dmask:0xf dim:3D unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
+        asm("image_load_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("3D") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(transmute<zluda_uint3>(coord)), "s"(*surface) : "memory");
     }
     else if constexpr (geo == ImageGeometry::A1D)
     {
-        asm("image_load_pck %0, %1, %2 dmask:0xf dim:1D_ARRAY unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+        asm("image_load_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("1D_ARRAY") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
     }
     else if constexpr (geo == ImageGeometry::A2D)
     {
-        asm("image_load_pck %0, %1, %2 dmask:0xf dim:2D_ARRAY unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
+        asm("image_load_pck %0, %1, %2 dmask:0xf" IMAGE_DIM("2D_ARRAY") " unorm\ns_waitcnt vmcnt(0)" : "=v"(data) : "v"(coord), "s"(*surface) : "memory");
     }
     else
     {
@@ -1904,5 +1910,23 @@ extern "C"
             __builtin_amdgcn_s_sleep(2);
         if (sleep_amount & 1U)
             __builtin_amdgcn_s_sleep(1);
+    }
+
+    float __ocml_tanh_f32(float) __attribute__((device));
+    float FUNC(tanh_f32)(float x)
+    {
+        return __ocml_tanh_f32(x);
+    }
+
+    float __ocml_copysign_f32(float, float) __attribute__((device));
+    float FUNC(copysign_f32)(float magnitude, float sign)
+    {
+        return __ocml_copysign_f32(magnitude, sign);
+    }
+
+    double __ocml_copysign_f64(double, double) __attribute__((device));
+    double FUNC(copysign_f64)(double magnitude, double sign)
+    {
+        return __ocml_copysign_f64(magnitude, sign);
     }
 }

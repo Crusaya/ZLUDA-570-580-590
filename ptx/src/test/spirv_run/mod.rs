@@ -198,6 +198,18 @@ test_ptx!(rsqrt, [0.25f64], [2f64]);
 test_ptx!(neg, [181i32], [-181i32]);
 test_ptx!(sin, [std::f32::consts::PI / 2f32], [1f32]);
 test_ptx!(cos, [std::f32::consts::PI], [-1f32]);
+#[test]
+fn copysign_hip() -> Result<(), Box<dyn std::error::Error>> {
+    let ptx = include_str!("copysign.ptx");
+    let mut output = [-2.0f32];
+    test_hip_assert("copysign", ptx, &[2.0f32, -1.0f32], &mut output)
+}
+#[test]
+fn tanh_hip() -> Result<(), Box<dyn std::error::Error>> {
+    let ptx = include_str!("tanh.ptx");
+    let mut output = [1.0f32];
+    test_hip_assert("tanh", ptx, &[f32::INFINITY], &mut output)
+}
 test_ptx!(lg2, [512f32], [9f32]);
 test_ptx!(
     ex2,

@@ -194,6 +194,7 @@ match {
     "call",
     "clz",
     "cos",
+    "copysign",
     "cvt",
     "cvta",
     "debug",
@@ -239,6 +240,7 @@ match {
     "shl",
     "shr",
     "sin",
+    "tanh",
     r"sm_[0-9]+" => ShaderModel,
     "sqrt",
     "st",
@@ -278,6 +280,7 @@ ExtendedID : &'input str = {
     "call",
     "clz",
     "cos",
+    "copysign",
     "cvt",
     "cvta",
     "debug",
@@ -323,6 +326,7 @@ ExtendedID : &'input str = {
     "shl",
     "shr",
     "sin",
+    "tanh",
     ShaderModel,
     "sqrt",
     "st",
@@ -860,6 +864,8 @@ Instruction: ast::Instruction<ast::ParsedArgParams<'input>> = {
     InstRsqrt,
     InstNeg,
     InstSin,
+    InstCopysign,
+    InstTanh,
     InstCos,
     InstLg2,
     InstEx2,
@@ -2086,6 +2092,17 @@ InstSin: ast::Instruction<ast::ParsedArgParams<'input>> = {
     "sin" ".approx" <ftz:".ftz"?> ".f32" <arg:Arg2> => {
         ast::Instruction::Sin{ flush_to_zero: ftz.is_some(), arg }
     },
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-copysign
+InstCopysign: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "copysign" ".f32" <arg:Arg3> => ast::Instruction::Copysign(ast::ScalarType::F32, arg),
+    "copysign" ".f64" <arg:Arg3> => ast::Instruction::Copysign(ast::ScalarType::F64, arg),
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-tanh
+InstTanh: ast::Instruction<ast::ParsedArgParams<'input>> = {
+    "tanh" ".approx" ".f32" <arg:Arg2> => ast::Instruction::Tanh(arg),
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-cos

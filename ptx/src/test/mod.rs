@@ -50,3 +50,12 @@ fn vectorAdd_11_ptx() -> Result<(), TranslateError> {
     let vector_add = include_str!("vectorAdd_11.ptx");
     compile_and_assert(CompilationMode::Wave32, vector_add)
 }
+
+#[test]
+fn floating_point_helper_instructions_ptx() -> Result<(), TranslateError> {
+    compile_and_assert(
+        CompilationMode::Wave32,
+        include_str!("spirv_run/copysign.ptx"),
+    )?;
+    compile_and_assert(CompilationMode::Wave32, include_str!("spirv_run/tanh.ptx"))
+}

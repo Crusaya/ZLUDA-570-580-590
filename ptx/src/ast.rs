@@ -418,6 +418,8 @@ pub enum Instruction<P: ArgParams> {
         flush_to_zero: bool,
         arg: Arg2<P>,
     },
+    Copysign(ScalarType, Arg3<P>),
+    Tanh(Arg2<P>),
     Lg2 {
         flush_to_zero: bool,
         arg: Arg2<P>,

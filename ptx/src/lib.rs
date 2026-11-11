@@ -23,6 +23,7 @@ pub use lalrpop_util::lexer::Token;
 pub use lalrpop_util::ParseError;
 use std::fmt;
 pub use translate::to_llvm_module;
+pub use translate::to_llvm_module_for_isa;
 pub use translate::to_llvm_module_for_raytracing;
 pub use translate::Module;
 pub use translate::TranslateError;

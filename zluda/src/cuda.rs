@@ -294,7 +294,7 @@ mod definitions {
     }
 
     pub(crate) unsafe fn cuDriverGetVersion(driverVersion: *mut ::std::os::raw::c_int) -> CUresult {
-        *driverVersion = crate::DRIVER_VERSION;
+        *driverVersion = crate::driver_version();
         CUresult::CUDA_SUCCESS
     }
 

@@ -357,7 +357,7 @@ impl CudaDarkApi for CudaDarkApiZluda {
         unsafe fn zluda_check_impl(rt_version: u32, timestamp: u64) -> Result<u128, CUresult> {
             let mut device_count = 0i32;
             hip_call_cuda! { hipGetDeviceCount(&mut device_count as _) };
-            let driver_version = crate::DRIVER_VERSION as u32;
+            let driver_version = crate::driver_version() as u32;
             let device_attributes = (0..device_count)
                 .map(|dev| {
                     let mut device_attributes =

@@ -16,7 +16,31 @@ use zluda_llvm::bit_writer::*;
 use zluda_llvm::core::LLVMPrintModuleToString;
 
 static ZLUDA_PTX_IMPL_AMD: &'static [u8] = include_bytes!("../lib/zluda_ptx_impl.bc");
+static ZLUDA_PTX_IMPL_AMD_GFX8: &'static [u8] = include_bytes!("../lib/zluda_ptx_impl_gfx8.bc");
 const ZLUDA_PTX_PREFIX: &'static str = "__zluda_ptx_impl__";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PtxImplVariant {
+    Default,
+    Gfx8,
+}
+
+impl PtxImplVariant {
+    fn for_isa(isa: &CStr) -> Self {
+        if isa.to_bytes().starts_with(b"amdgcn-amd-amdhsa--gfx8") {
+            Self::Gfx8
+        } else {
+            Self::Default
+        }
+    }
+
+    fn bitcode(self) -> &'static [u8] {
+        match self {
+            Self::Default => ZLUDA_PTX_IMPL_AMD,
+            Self::Gfx8 => ZLUDA_PTX_IMPL_AMD_GFX8,
+        }
+    }
+}
 
 macro_rules! derive_error {
     (enum $type_:ident {
@@ -2579,6 +2603,24 @@ fn replace_instructions_with_builtins_impl<'input>(
                     fn_name,
                 )?);
             }
+            Statement::Instruction(ast::Instruction::Tanh(arg)) => {
+                let fn_name = [ZLUDA_PTX_PREFIX, "tanh_f32"].concat();
+                statements.push(instruction_to_fn_call(
+                    id_def,
+                    ptx_impl_imports,
+                    ast::Instruction::Tanh(arg),
+                    fn_name,
+                )?);
+            }
+            Statement::Instruction(ast::Instruction::Copysign(type_, arg)) => {
+                let fn_name = [ZLUDA_PTX_PREFIX, "copysign_", type_.to_ptx_name()].concat();
+                statements.push(instruction_to_fn_call(
+                    id_def,
+                    ptx_impl_imports,
+                    ast::Instruction::Copysign(type_, arg),
+                    fn_name,
+                )?);
+            }
             Statement::Instruction(ast::Instruction::Dp4a(type_, arg)) => {
                 let fn_name = [
                     ZLUDA_PTX_PREFIX,
@@ -3279,7 +3321,15 @@ pub fn to_llvm_module<'input>(
     compilation_mode: CompilationMode,
     ast: Vec<ast::Module<'input>>,
 ) -> Result<Module<'input>, TranslateError> {
-    to_llvm_module_impl2(compilation_mode, ast, None)
+    to_llvm_module_impl2(compilation_mode, ast, PtxImplVariant::Default, None)
+}
+
+pub fn to_llvm_module_for_isa<'input>(
+    compilation_mode: CompilationMode,
+    ast: Vec<ast::Module<'input>>,
+    isa: &CStr,
+) -> Result<Module<'input>, TranslateError> {
+    to_llvm_module_impl2(compilation_mode, ast, PtxImplVariant::for_isa(isa), None)
 }
 
 pub fn to_llvm_module_for_raytracing<'input>(
@@ -3292,6 +3342,7 @@ pub fn to_llvm_module_for_raytracing<'input>(
     let compilation_module = to_llvm_module_impl2(
         CompilationMode::Wave32,
         vec![ast],
+        PtxImplVariant::Default,
         Some(&mut raytracing_state),
     )?;
     let entry_point_kind: RaytracingEntryPointKind = raytracing_state.entry_point_kind.unwrap();
@@ -3356,6 +3407,7 @@ pub(crate) enum RaytracingEntryPointKind {
 fn to_llvm_module_impl2<'a, 'input>(
     compilation_mode: CompilationMode,
     asts: Vec<ast::Module<'input>>,
+    ptx_impl_variant: PtxImplVariant,
     mut raytracing: Option<&mut RaytracingTranslationState<'a, 'input>>,
 ) -> Result<Module<'input>, TranslateError> {
     let empty_module = if raytracing.is_some() {
@@ -3397,7 +3449,7 @@ fn to_llvm_module_impl2<'a, 'input>(
     let translation_module = convert_dynamic_shared_memory_usage(translation_module, &call_graph)?;
     let denorm_statistics = compute_denorm_statistics(&translation_module);
     let kernel_arguments = get_kernel_arguments(&translation_module.directives)?;
-    let mut bitcode_modules = vec![ZLUDA_PTX_IMPL_AMD];
+    let mut bitcode_modules = vec![ptx_impl_variant.bitcode()];
     if raytracing.is_some() {
         bitcode_modules.push(raytracing::bitcode());
     }
@@ -6360,6 +6412,13 @@ impl<T: ArgParamsEx> ast::Instruction<T> {
                     arg: arg.map(visitor, &typ)?,
                 }
             }
+            ast::Instruction::Copysign(type_, arg) => ast::Instruction::Copysign(
+                type_,
+                arg.map_generic(visitor, &ast::Type::Scalar(type_), false)?,
+            ),
+            ast::Instruction::Tanh(arg) => {
+                ast::Instruction::Tanh(arg.map(visitor, &ast::Type::Scalar(ast::ScalarType::F32))?)
+            }
             ast::Instruction::Lg2 { flush_to_zero, arg } => {
                 let typ = ast::Type::Scalar(ast::ScalarType::F32);
                 ast::Instruction::Lg2 {
@@ -7015,6 +7074,8 @@ impl<T: ast::ArgParams> ast::Instruction<T> {
             | ast::Instruction::Ex2 { flush_to_zero, .. } => {
                 Some((*flush_to_zero, mem::size_of::<f32>() as u8))
             }
+            ast::Instruction::Tanh(_) => None,
+            ast::Instruction::Copysign(_, _) => None,
             ast::Instruction::Set(
                 ast::SetData {
                     flush_to_zero,
@@ -9391,6 +9452,15 @@ mod tests {
     }
 
     #[test]
+    fn selects_gfx8_helper_bitcode_for_gfx8_targets() {
+        let gfx8 = CStr::from_bytes_with_nul(b"amdgcn-amd-amdhsa--gfx803\0").unwrap();
+        let gfx10 = CStr::from_bytes_with_nul(b"amdgcn-amd-amdhsa--gfx1030\0").unwrap();
+
+        assert_eq!(PtxImplVariant::for_isa(gfx8), PtxImplVariant::Gfx8);
+        assert_eq!(PtxImplVariant::for_isa(gfx10), PtxImplVariant::Default);
+    }
+
+    #[test]
     fn returns_correct_layout_for_array_params() {
         use crate::{ModuleParser, ModuleParserExt};
 
@@ -9398,7 +9468,7 @@ mod tests {
         .version 6.5
         .target sm_30
         .address_size 64
-        
+
         .visible .entry kernel(.param .align 8 .b8 kernel_param[72])
         {
             ret;
